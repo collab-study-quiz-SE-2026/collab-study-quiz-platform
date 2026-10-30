@@ -1,0 +1,31 @@
+:root {
+  font-family: system-ui, sans-serif;
+  color: #18332e;
+  background: #f2f6f3;
+  font-synthesis: none;
+  line-height: 1.6;
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; }
+main { max-width: 720px; margin: 72px auto; padding: 0 24px; }
+.eyebrow { color: #536e64; font-size: 0.75rem; font-weight: 700; letter-spacing: 0.12em; }
+h1 { margin: 0; font-size: 3rem; line-height: 1.2; }
+.intro { margin-top: 12px; color: #536e64; }
+section { margin-top: 36px; padding: 28px; background: white; border: 1px solid #d4e0d8; border-radius: 12px; }
+h2 { margin-top: 0; font-size: 1.2rem; }
+.status { display: flex; align-items: center; gap: 10px; font-weight: 700; }
+.dot { width: 10px; height: 10px; border-radius: 50%; background: currentColor; }
+.connected { color: #216445; }
+.checking { color: #755d19; }
+.unavailable { color: #a12f32; }
+.api-url { overflow-wrap: anywhere; font-size: 0.9rem; }
+button { padding: 10px 16px; border: 0; border-radius: 6px; background: #216445; color: white; font: inherit; cursor: pointer; }
+button:hover { background: #174e34; }
+button:focus-visible { outline: 3px solid #a58621; outline-offset: 3px; }
+button:disabled { opacity: 0.6; cursor: wait; }
+.footer { margin-top: 24px; color: #536e64; font-size: 0.9rem; }
+@media (max-width: 480px) {
+  main { margin-top: 36px; padding: 0 16px; }
+  section { padding: 20px; }
+}
