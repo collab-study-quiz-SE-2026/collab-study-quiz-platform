@@ -48,7 +48,6 @@ collab-study-quiz-platform/
     │   ├── test_health.py
     │   ├── test_database.py
     │   ├── test_cors.py
-    │   ├── test_websocket.py
     │   └── test_sqlalchemy.py
     ├── alembic/
     │   ├── env.py
@@ -224,7 +223,7 @@ cd backend
 .\.venv\Scripts\python.exe -m pytest
 ```
 
-All nine tests should pass. The original test is preserved. The live database
+All six tests should pass. The original test is preserved. The live database
 test temporarily selects `TEST_PGDATABASE` and only runs `SELECT 1`; it does not
 create tables or change development data. It refuses to use the configured
 development database. Without `TEST_PGDATABASE`, both live database tests are
@@ -352,8 +351,8 @@ cd backend
 .\.venv\Scripts\python.exe -m pytest
 ```
 
-Reuse `csmqp_test` created earlier. Expect nine passing tests. Without
-`TEST_PGDATABASE`, expect seven passing tests and two skipped integration tests.
+Reuse `csmqp_test` created earlier. Expect six passing tests. Without
+`TEST_PGDATABASE`, expect four passing tests and two skipped integration tests.
 
 ## Frontend foundation and fresh-clone team setup
 
@@ -448,7 +447,7 @@ cd backend
 .\.venv\Scripts\python.exe -m pytest
 ```
 
-Reuse `csmqp_test` if it exists. Expect nine passing tests with the database
+Reuse `csmqp_test` if it exists. Expect six passing tests with the database
 settings loaded. The two CORS tests verify that the frontend origin receives
 permission and an unrelated origin does not.
 Stop Vite and FastAPI with `Ctrl+C`. Stop PostgreSQL with `docker compose stop db`
@@ -472,54 +471,8 @@ from the repository root; its data stays in the named volume.
 - `backend/tests/test_cors.py` checks the allowed and unrelated origins.
 
 S3-compatible storage and TLS deployment verification remain deferred.
+A minimal WebSocket integration point is the next separate infrastructure task.
 Story #21 stays open until its remaining criteria are completed.
-
-## Minimal WebSocket integration point
-
-Tracked in [Task #38](https://github.com/collab-study-quiz-SE-2026/collab-study-quiz-platform/issues/38).
-The backend now accepts a local WebSocket connection at
-`ws://127.0.0.1:8000/ws/health`. It replies `pong` to the text `ping`. Other text
-receives `Send ping`. You can send more than one message on the same connection.
-This only proves that WebSocket communication works; it does not implement
-quiz synchronization, authentication, rooms, timers, or scores.
-
-Install the updated backend requirements and start FastAPI as above. From a
-second PowerShell window in `backend`, run this small real connection check:
-
-```powershell
-@'
-from websockets.sync.client import connect
-
-with connect("ws://127.0.0.1:8000/ws/health", origin="http://localhost:5173") as socket:
-    socket.send("ping")
-    print(socket.recv())
-'@ | .\.venv\Scripts\python.exe -
-```
-
-Expect `pong`. The `with` block closes the client connection when finished.
-The frontend's existing indicator still checks REST `/health`; it does not
-claim that WebSocket or database checks have passed.
-
-The code remains in `backend/app/main.py`. `@app.websocket` registers the route.
-`accept()` completes the connection handshake. `receive_text()` waits for a
-message and `send_text()` replies. `while True` keeps the connection open for
-more messages. Catching `WebSocketDisconnect` ends the function cleanly when
-the client leaves.
-
-CORS middleware does not apply to WebSockets. The route separately checks a
-browser's `Origin` against `FRONTEND_ORIGIN`, and rejects unrelated browser
-origins before accepting the connection. Native health-check clients may omit
-the Origin header. This public probe exposes no account data; origin checking
-is not a replacement for authentication on future application sockets.
-`websockets` is the small protocol dependency Uvicorn needs to serve the route.
-`backend/tests/test_websocket.py` checks repeated ping/pong messages,
-unexpected text, and rejection of unrelated browser origins. Context managers
-in those tests also close the test connections.
-
-Use local `ws://` only for this development setup. Deployment must add and
-verify HTTPS/WSS with TLS 1.3 before this infrastructure story is complete.
-S3-compatible storage remains deferred as agreed. No persistent volumes or
-application tables are changed by this WebSocket task.
 
 ## Part 1 Deliverables
 

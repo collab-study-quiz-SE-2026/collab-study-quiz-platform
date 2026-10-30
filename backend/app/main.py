@@ -1,14 +1,13 @@
 import os
 
 import psycopg
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI()
-frontend_origin = os.getenv("FRONTEND_ORIGIN", "http://localhost:5173")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[frontend_origin],
+    allow_origins=[os.getenv("FRONTEND_ORIGIN", "http://localhost:5173")],
     allow_methods=["GET"],
 )
 
@@ -29,22 +28,3 @@ def database_health():
         raise HTTPException(status_code=503, detail="Database unavailable") from None
 
     return {"status": "ok", "database": "connected"}
-
-
-@app.websocket("/ws/health")
-async def websocket_health(websocket: WebSocket):
-    origin = websocket.headers.get("origin")
-    if origin is not None and origin != frontend_origin:
-        await websocket.close(code=1008)
-        return
-
-    await websocket.accept()
-    try:
-        while True:
-            message = await websocket.receive_text()
-            if message == "ping":
-                await websocket.send_text("pong")
-            else:
-                await websocket.send_text("Send ping")
-    except WebSocketDisconnect:
-        pass
