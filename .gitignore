@@ -11,3 +11,8 @@ __pycache__/
 !.env.example
 *.pem
 *.key
+
+# Frontend dependencies and build output
+node_modules/
+dist/
+*.tsbuildinfo

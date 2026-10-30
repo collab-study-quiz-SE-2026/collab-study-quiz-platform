@@ -35,6 +35,9 @@ RBAC, parameterized queries, server-side answer-key withholding.
 collab-study-quiz-platform/
 ├── README.md
 ├── .gitignore
+├── frontend/               # React + Vite + TypeScript connection check
+├── docker-compose.yml
+├── .env.example
 ├── docs/                   # Existing SRS, SDD, and test plan PDFs
 └── backend/
     ├── app/
@@ -44,6 +47,7 @@ collab-study-quiz-platform/
     ├── tests/
     │   ├── test_health.py
     │   ├── test_database.py
+    │   ├── test_cors.py
     │   └── test_sqlalchemy.py
     ├── alembic/
     │   ├── env.py
@@ -154,7 +158,7 @@ the PowerShell window where you will run the backend:
 
 ```powershell
 Get-Content .env | ForEach-Object {
-    if ($_ -match '^PG[A-Z]+=') {
+    if ($_ -match '^(PG[A-Z]+|FRONTEND_ORIGIN)=') {
         $parts = $_ -split '=', 2
         [Environment]::SetEnvironmentVariable($parts[0], $parts[1], 'Process')
     }
@@ -219,7 +223,7 @@ cd backend
 .\.venv\Scripts\python.exe -m pytest
 ```
 
-All four tests should pass. The original test is preserved. The live database
+All six tests should pass. The original test is preserved. The live database
 test temporarily selects `TEST_PGDATABASE` and only runs `SELECT 1`; it does not
 create tables or change development data. It refuses to use the configured
 development database. Without `TEST_PGDATABASE`, both live database tests are
@@ -347,8 +351,128 @@ cd backend
 .\.venv\Scripts\python.exe -m pytest
 ```
 
-Reuse `csmqp_test` created earlier. Expect four passing tests. Without
-`TEST_PGDATABASE`, expect two passing tests and two skipped integration tests.
+Reuse `csmqp_test` created earlier. Expect six passing tests. Without
+`TEST_PGDATABASE`, expect four passing tests and two skipped integration tests.
+
+## Frontend foundation and fresh-clone team setup
+
+Tracked in [Task #36](https://github.com/collab-study-quiz-SE-2026/collab-study-quiz-platform/issues/36),
+part of Story #21. The frontend is one React + TypeScript page, served by Vite.
+It checks `GET /health` and displays whether the backend is reachable. It does
+not check database readiness; use `/health/db` separately for that.
+
+### Start a fresh clone on Windows
+
+Prerequisites: Git, Python 3.12+, Node.js 22.19+ (or a supported newer LTS),
+and the existing Docker Desktop installation using Linux containers and WSL 2.
+Each teammate runs their own local stack and creates their own `.env` files.
+
+**Terminal 1 — clone and start PostgreSQL:**
+
+```powershell
+git clone https://github.com/collab-study-quiz-SE-2026/collab-study-quiz-platform.git
+cd collab-study-quiz-platform
+Copy-Item .env.example .env
+notepad .env
+# Replace PGPASSWORD with a local development password. Save the file.
+docker compose config --quiet
+docker compose up -d --wait db
+```
+
+Start Docker Desktop first and wait for its engine to be running.
+Copy `.env.example` only once; reuse an existing `.env` rather than overwriting it.
+`FRONTEND_ORIGIN=http://localhost:5173` allows the local Vite frontend to read
+the backend response. If your existing `.env` lacks it, that origin is the default.
+
+**Terminal 2 — backend (begin in the repository root):**
+
+```powershell
+Get-Content .env | ForEach-Object {
+    if ($_ -match '^(PG[A-Z]+|FRONTEND_ORIGIN)=') {
+        $parts = $_ -split '=', 2
+        [Environment]::SetEnvironmentVariable($parts[0], $parts[1], 'Process')
+    }
+}
+cd backend
+py -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe -m alembic upgrade head
+.\.venv\Scripts\python.exe -m uvicorn app.main:app --reload
+```
+
+Create `.venv` only on the first setup. Use `python` instead of `py` if your
+Python installation provides that command. No environment activation is needed.
+
+**Terminal 3 — frontend (begin in the repository root):**
+
+```powershell
+cd frontend
+Copy-Item .env.example .env
+npm.cmd ci
+npm.cmd run dev
+```
+
+Open http://localhost:5173. Expect **Backend connected**. Use **Check connection**
+to retry after starting or stopping FastAPI. The frontend waits up to five seconds
+before showing **Backend unavailable**. Its `.env` contains only
+`VITE_API_URL=http://127.0.0.1:8000`. Vite exposes `VITE_*` values to browsers,
+so never put passwords or other secrets there. Restart Vite after changing it.
+Open the exact localhost URL: `127.0.0.1:5173` is a different browser origin.
+The fixed port avoids silently switching to a port that CORS does not allow.
+
+If the indicator says unavailable, check that FastAPI is running, that
+`http://127.0.0.1:8000/health` responds, and that `VITE_API_URL` and
+`FRONTEND_ORIGIN` match the URLs you use. CORS is a browser permission to read
+responses; it is not authentication or a firewall.
+
+### Build and verify
+
+From `frontend`:
+
+```powershell
+npm.cmd run build
+```
+
+This runs TypeScript checking followed by Vite's production build into `dist/`.
+The lockfile makes `npm.cmd ci` install the same dependency versions for teammates.
+Keep `node_modules`, `dist`, and local `.env` files out of Git.
+
+Run backend tests with the environment loaded as above. For a fresh database,
+create the dedicated test database once from the repository root:
+
+```powershell
+docker compose exec db sh -c 'createdb -U "$POSTGRES_USER" csmqp_test'
+$env:TEST_PGDATABASE = 'csmqp_test'
+cd backend
+.\.venv\Scripts\python.exe -m pytest
+```
+
+Reuse `csmqp_test` if it exists. Expect six passing tests with the database
+settings loaded. The two CORS tests verify that the frontend origin receives
+permission and an unrelated origin does not.
+Stop Vite and FastAPI with `Ctrl+C`. Stop PostgreSQL with `docker compose stop db`
+from the repository root; its data stays in the named volume.
+
+### Frontend files and the small backend change
+
+- `frontend/package.json` lists dependencies and the dev/build commands;
+  `package-lock.json` records exact installed versions.
+- `frontend/index.html` provides the page and the `root` element.
+- `frontend/src/main.tsx` mounts the React application in that element.
+- `frontend/src/App.tsx` reads the public API URL. `useState` tracks checking,
+  connected, or unavailable. `useEffect` starts one check when the page mounts.
+  `fetch` requests `/health`; a successful HTTP response with `status: "ok"`
+  updates the indicator. The button repeats the same check.
+- `frontend/src/style.css` provides basic readable, responsive styling.
+- `frontend/tsconfig.json` enables TypeScript checks; `vite.config.ts` enables
+  React support in Vite. `frontend/.env.example` shows the public API setting.
+- `backend/app/main.py` adds FastAPI's CORS middleware with one configured
+  frontend origin and GET requests. Existing health endpoint code is unchanged.
+- `backend/tests/test_cors.py` checks the allowed and unrelated origins.
+
+S3-compatible storage and TLS deployment verification remain deferred.
+A minimal WebSocket integration point is the next separate infrastructure task.
+Story #21 stays open until its remaining criteria are completed.
 
 ## Part 1 Deliverables
 
