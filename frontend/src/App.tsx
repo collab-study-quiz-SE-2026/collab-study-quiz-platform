@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 
-const apiUrl = (import.meta.env.VITE_API_URL || "http://127.0.0.1:8000").replace(/\/$/, "");
+const defaultApiUrl = window.location.protocol === "https:" ? "/api" : "http://127.0.0.1:8000";
+const apiUrl = (import.meta.env.VITE_API_URL || defaultApiUrl).replace(/\/$/, "");
 
 type Connection = "checking" | "connected" | "unavailable";
 

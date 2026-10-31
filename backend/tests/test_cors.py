@@ -6,7 +6,7 @@ from app.main import app
 
 
 def test_frontend_origin_can_read_health():
-    origin = os.getenv("FRONTEND_ORIGIN", "http://localhost:5173")
+    origin = os.getenv("FRONTEND_ORIGIN", "http://localhost:5173").split(",")[0].strip()
     with TestClient(app) as client:
         response = client.get("/health", headers={"Origin": origin})
 
