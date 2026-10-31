@@ -16,3 +16,5 @@ def test_sqlalchemy_select_one(monkeypatch):
 
     with SessionLocal() as session:
         assert session.execute(text("SELECT 1")).scalar_one() == 1
+        value = "a'; DROP TABLE should_not_exist; --"
+        assert session.execute(text("SELECT :value"), {"value": value}).scalar_one() == value
