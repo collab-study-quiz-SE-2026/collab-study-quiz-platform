@@ -13,13 +13,16 @@ collaborating on questions, playing quizzes, and tracking learning progress.
 
 - React + Vite + TypeScript frontend with a backend connection indicator.
 - FastAPI REST health checks and a small WebSocket ping/pong connection.
-- PostgreSQL 15 with persistent data, SQLAlchemy 2 sessions, and Alembic setup.
+- PostgreSQL 15 with persistent data, SQLAlchemy 2 sessions, Alembic migrations,
+  and a small users table for authentication.
+- Student registration, Bcrypt password hashing, 60-minute signed JWT login,
+  logout invalidation, and server-side Student/Moderator authorization checks.
 - S3-compatible RustFS storage with a persistent bucket and an S3 client.
 - Caddy serving the built frontend, HTTPS API routes, and WSS with TLS 1.3.
 - Environment-based credentials, ignored local secrets, and parameterized SQL.
 
-Authentication, application tables, materials, quizzes, and analytics belong
-to their own feature issues. The storage foundation does not implement uploads.
+Materials, quizzes, analytics, and their application tables belong to their own
+feature issues. The storage foundation does not implement uploads.
 
 ## Local addresses
 
@@ -42,7 +45,7 @@ Public deployment and release configuration follow the team's CI/integration sta
 ## Repository
 
 ```text
-backend/app/          FastAPI endpoints, database setup, S3 client
+backend/app/          FastAPI endpoints, authentication, database setup, S3 client
 backend/tests/        API, CORS, database, storage, WebSocket tests
 backend/alembic/      Migration environment and future revisions
 backend/setup_storage.py   Idempotent bucket initialization
