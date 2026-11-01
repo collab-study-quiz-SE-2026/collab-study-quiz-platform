@@ -1,7 +1,7 @@
 from alembic import context
 
 from app.database import Base, engine
-from app.models import User
+from app.models import Question, User
 
 target_metadata = Base.metadata
 
