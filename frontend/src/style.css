@@ -24,6 +24,14 @@ button { padding: 10px 16px; border: 0; border-radius: 6px; background: #216445;
 button:hover { background: #174e34; }
 button:focus-visible { outline: 3px solid #a58621; outline-offset: 3px; }
 button:disabled { opacity: 0.6; cursor: wait; }
+.secondary { background: #e6eee9; color: #18332e; }
+.secondary:hover { background: #d4e0d8; }
+.mode-buttons { display: flex; gap: 8px; margin-bottom: 20px; }
+form { display: grid; gap: 8px; }
+label { font-weight: 700; }
+input { width: 100%; padding: 10px; border: 1px solid #aebfb5; border-radius: 6px; font: inherit; }
+form > button { margin-top: 12px; justify-self: start; }
+.message { margin-bottom: 0; font-weight: 700; }
 .footer { margin-top: 24px; color: #536e64; font-size: 0.9rem; }
 @media (max-width: 480px) {
   main { margin-top: 36px; padding: 0 16px; }

@@ -1,7 +1,8 @@
 import os
+from collections.abc import Generator
 
 from sqlalchemy import URL, create_engine
-from sqlalchemy.orm import DeclarativeBase, sessionmaker
+from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 database_url = URL.create(
     "postgresql+psycopg",
@@ -13,8 +14,17 @@ database_url = URL.create(
 )
 
 engine = create_engine(database_url, connect_args={"connect_timeout": 3})
-SessionLocal = sessionmaker(bind=engine)
+SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
 
 
 class Base(DeclarativeBase):
     pass
+
+
+def get_db() -> Generator[Session, None, None]:
+    """Open one database session for a request and always close it afterwards."""
+    session = SessionLocal()
+    try:
+        yield session
+    finally:
+        session.close()
