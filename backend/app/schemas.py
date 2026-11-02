@@ -41,18 +41,19 @@ class QuestionCreate(BaseModel):
     question_text: str = Field(min_length=1)
     options: list[str] = Field(min_length=4, max_length=4)
     correct_answer_index: int = Field(ge=0)
+    subject: str = Field(default="General", min_length=1)
     topic: str = Field(min_length=1)
     difficulty: Literal["easy", "medium", "hard"] = "medium"
     explanation: str | None = None
 
-    @field_validator("question_text", "topic", mode="before")
+    @field_validator("question_text", "subject", "topic", mode="before")
     @classmethod
     def strip_required_text(cls, value: object) -> object:
         if isinstance(value, str):
             return value.strip()
         return value
 
-    @field_validator("question_text", "topic")
+    @field_validator("question_text", "subject", "topic")
     @classmethod
     def reject_blank_text(cls, value: str) -> str:
         if not value:
@@ -80,6 +81,44 @@ class QuestionCreate(BaseModel):
         return self
 
 
+class QuestionUpdate(BaseModel):
+    question_text: str | None = Field(default=None, min_length=1)
+    options: list[str] | None = Field(default=None, min_length=4, max_length=4)
+    correct_answer_index: int | None = Field(default=None, ge=0)
+    subject: str | None = Field(default=None, min_length=1)
+    topic: str | None = Field(default=None, min_length=1)
+    difficulty: Literal["easy", "medium", "hard"] | None = None
+    explanation: str | None = None
+
+    @field_validator("question_text", "subject", "topic", mode="before")
+    @classmethod
+    def strip_optional_text(cls, value: object) -> object:
+        if isinstance(value, str):
+            return value.strip()
+        return value
+
+    @field_validator("question_text", "subject", "topic")
+    @classmethod
+    def reject_blank_text(cls, value: str | None) -> str | None:
+        if value is not None and not value:
+            raise ValueError("must not be blank")
+        return value
+
+    @field_validator("options", mode="before")
+    @classmethod
+    def strip_options(cls, value: object) -> object:
+        if isinstance(value, list):
+            return [option.strip() if isinstance(option, str) else option for option in value]
+        return value
+
+    @field_validator("options")
+    @classmethod
+    def reject_blank_options(cls, value: list[str] | None) -> list[str] | None:
+        if value is not None and any(not option for option in value):
+            raise ValueError("options must not be blank")
+        return value
+
+
 class ModerateQuestionRequest(BaseModel):
     action: Literal["approve", "reject"] | None = None
     status: Literal["approved", "rejected"] | None = None
@@ -103,6 +142,7 @@ class QuestionResponse(BaseModel):
     question_text: str
     options: list[str]
     correct_answer_index: int
+    subject: str = "General"
     topic: str
     difficulty: str
     explanation: str | None = None
@@ -117,3 +157,9 @@ class QuestionResponse(BaseModel):
 class QuestionListResponse(BaseModel):
     total: int
     items: list[QuestionResponse]
+
+
+class CategorySummaryResponse(BaseModel):
+    subjects: list[str]
+    topics: list[str]
+    difficulties: list[str]
