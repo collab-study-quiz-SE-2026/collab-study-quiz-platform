@@ -1,3 +1,4 @@
+from datetime import UTC, datetime
 import os
 from contextlib import closing
 
@@ -10,10 +11,11 @@ from sqlalchemy.orm import Session
 
 from app.auth import create_access_token, get_current_user, hash_password, verify_password
 from app.database import get_db
-from app.models import Question, User, UserRole
+from app.models import Question, QuestionStatus, User, UserRole
 from app.schemas import (
     LoginRequest,
     MessageResponse,
+    ModerateQuestionRequest,
     QuestionCreate,
     QuestionResponse,
     RegistrationRequest,
@@ -30,9 +32,18 @@ frontend_origins = [origin.strip() for origin in os.getenv(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=frontend_origins,
-    allow_methods=["GET", "POST"],
+    allow_methods=["GET", "POST", "PATCH"],
     allow_headers=["Authorization", "Content-Type"],
 )
+
+
+def require_moderator(current_user: User = Depends(get_current_user)) -> User:
+    if current_user.role != UserRole.MODERATOR:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Moderator privileges required",
+        )
+    return current_user
 
 
 @app.get("/health")
@@ -144,6 +155,7 @@ def create_question(
         difficulty=details.difficulty,
         explanation=details.explanation,
         creator_id=current_user.id,
+        status=QuestionStatus.PENDING,
     )
     db.add(question)
     db.commit()
@@ -160,9 +172,16 @@ def create_question(
 def search_questions(
     topic: str | None = None,
     difficulty: str | None = None,
+    status_filter: QuestionStatus | None = None,
     db: Session = Depends(get_db),
 ):
     stmt = select(Question)
+    if status_filter:
+        stmt = stmt.where(Question.status == status_filter)
+    else:
+        # Exclude rejected questions from published search results
+        stmt = stmt.where(Question.status != QuestionStatus.REJECTED)
+
     if topic:
         stmt = stmt.where(Question.topic == topic)
     if difficulty:
@@ -197,11 +216,18 @@ def list_questions(
     topic: str | None = None,
     difficulty: str | None = None,
     creator_id: int | None = None,
+    status_filter: QuestionStatus | None = None,
     limit: int = 50,
     offset: int = 0,
     db: Session = Depends(get_db),
 ):
     stmt = select(Question)
+    if status_filter:
+        stmt = stmt.where(Question.status == status_filter)
+    else:
+        # Exclude rejected questions from published sets
+        stmt = stmt.where(Question.status != QuestionStatus.REJECTED)
+
     if topic:
         stmt = stmt.where(Question.topic == topic)
     if difficulty:
@@ -210,6 +236,111 @@ def list_questions(
         stmt = stmt.where(Question.creator_id == creator_id)
     stmt = stmt.order_by(Question.id.desc()).offset(offset).limit(limit)
     return list(db.scalars(stmt).all())
+
+
+# --- Moderation Endpoints (Story #14) ---
+
+
+@app.get("/moderation/questions", response_model=list[QuestionResponse])
+@app.get(
+    "/api/v1/moderation/questions",
+    response_model=list[QuestionResponse],
+    include_in_schema=False,
+)
+def review_submitted_questions(
+    status_filter: QuestionStatus | None = None,
+    topic: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+    moderator: User = Depends(require_moderator),
+    db: Session = Depends(get_db),
+):
+    """Allow authorized moderators to review submitted questions."""
+    stmt = select(Question)
+    if status_filter:
+        stmt = stmt.where(Question.status == status_filter)
+    if topic:
+        stmt = stmt.where(Question.topic == topic)
+    stmt = stmt.order_by(Question.created_at.desc()).offset(offset).limit(limit)
+    return list(db.scalars(stmt).all())
+
+
+@app.patch("/questions/{question_id}/moderate", response_model=QuestionResponse)
+@app.post(
+    "/questions/{question_id}/moderate",
+    response_model=QuestionResponse,
+    include_in_schema=False,
+)
+@app.post(
+    "/api/v1/questions/{question_id}/moderate",
+    response_model=QuestionResponse,
+    include_in_schema=False,
+)
+def moderate_question(
+    question_id: int,
+    decision: ModerateQuestionRequest,
+    moderator: User = Depends(require_moderator),
+    db: Session = Depends(get_db),
+):
+    """Approve or reject a question. Restricted to authorized moderators."""
+    question = db.get(Question, question_id)
+    if question is None:
+        raise HTTPException(status_code=404, detail="Question not found")
+
+    target_status = (
+        QuestionStatus.APPROVED
+        if decision.status == "approved" or decision.action == "approve"
+        else QuestionStatus.REJECTED
+    )
+    question.status = target_status
+    question.moderator_id = moderator.id
+    question.moderated_at = datetime.now(UTC)
+    question.moderation_comment = decision.comment
+
+    db.commit()
+    db.refresh(question)
+    return question
+
+
+@app.post("/questions/{question_id}/approve", response_model=QuestionResponse)
+@app.post(
+    "/api/v1/questions/{question_id}/approve",
+    response_model=QuestionResponse,
+    include_in_schema=False,
+)
+def approve_question(
+    question_id: int,
+    moderator: User = Depends(require_moderator),
+    db: Session = Depends(get_db),
+):
+    """Convenience endpoint: approve question."""
+    return moderate_question(
+        question_id=question_id,
+        decision=ModerateQuestionRequest(status="approved"),
+        moderator=moderator,
+        db=db,
+    )
+
+
+@app.post("/questions/{question_id}/reject", response_model=QuestionResponse)
+@app.post(
+    "/api/v1/questions/{question_id}/reject",
+    response_model=QuestionResponse,
+    include_in_schema=False,
+)
+def reject_question(
+    question_id: int,
+    comment: str | None = None,
+    moderator: User = Depends(require_moderator),
+    db: Session = Depends(get_db),
+):
+    """Convenience endpoint: reject question."""
+    return moderate_question(
+        question_id=question_id,
+        decision=ModerateQuestionRequest(status="rejected", comment=comment),
+        moderator=moderator,
+        db=db,
+    )
 
 
 @app.websocket("/ws/health")
