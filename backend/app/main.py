@@ -174,8 +174,20 @@ def create_question(
 )
 def list_categories(db: Session = Depends(get_db)):
     """Return distinct subjects, topics, and difficulty levels in the question bank."""
-    subjects = list(db.scalars(select(Question.subject).distinct()).all())
-    topics = list(db.scalars(select(Question.topic).distinct()).all())
+    subjects = list(
+        db.scalars(
+            select(Question.subject)
+            .where(Question.status == QuestionStatus.APPROVED)
+            .distinct()
+        ).all()
+    )
+    topics = list(
+        db.scalars(
+            select(Question.topic)
+            .where(Question.status == QuestionStatus.APPROVED)
+            .distinct()
+        ).all()
+    )
     return CategorySummaryResponse(
         subjects=sorted(subjects),
         topics=sorted(topics),
@@ -194,15 +206,9 @@ def search_questions(
     topic: str | None = None,
     category: str | None = None,
     difficulty: str | None = None,
-    status_filter: QuestionStatus | None = None,
     db: Session = Depends(get_db),
 ):
-    stmt = select(Question)
-    if status_filter:
-        stmt = stmt.where(Question.status == status_filter)
-    else:
-        # Exclude rejected questions from published search results
-        stmt = stmt.where(Question.status != QuestionStatus.REJECTED)
+    stmt = select(Question).where(Question.status == QuestionStatus.APPROVED)
 
     if subject:
         stmt = stmt.where(Question.subject == subject)
@@ -227,7 +233,7 @@ def read_question(
     db: Session = Depends(get_db),
 ):
     question = db.get(Question, question_id)
-    if question is None:
+    if question is None or question.status != QuestionStatus.APPROVED:
         raise HTTPException(status_code=404, detail="Question not found")
     return question
 
@@ -244,17 +250,11 @@ def list_questions(
     category: str | None = None,
     difficulty: str | None = None,
     creator_id: int | None = None,
-    status_filter: QuestionStatus | None = None,
     limit: int = 50,
     offset: int = 0,
     db: Session = Depends(get_db),
 ):
-    stmt = select(Question)
-    if status_filter:
-        stmt = stmt.where(Question.status == status_filter)
-    else:
-        # Exclude rejected questions from published sets
-        stmt = stmt.where(Question.status != QuestionStatus.REJECTED)
+    stmt = select(Question).where(Question.status == QuestionStatus.APPROVED)
 
     if subject:
         stmt = stmt.where(Question.subject == subject)

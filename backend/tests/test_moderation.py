@@ -233,6 +233,31 @@ def test_rejected_questions_excluded_from_published_sets(test_setup):
     assert q_good["id"] in search_ids
     assert q_bad["id"] not in search_ids, "Rejected question must not appear in search results"
 
+    # A rejected question must not be available through direct lookup either.
+    rejected_detail = client.get(f"/questions/{q_bad['id']}")
+    assert rejected_detail.status_code == 404
+
+
+def test_pending_questions_are_hidden_from_public_endpoints(test_setup):
+    client, _, _, student_token, _, _ = test_setup
+
+    pending = client.post(
+        "/questions",
+        json=question_payload(question_text="Still waiting for review"),
+        headers={"Authorization": f"Bearer {student_token}"},
+    ).json()
+
+    # Public lists and searches return only approved questions, even if a caller
+    # tries to request pending questions with an extra query parameter.
+    assert client.get("/questions").json() == []
+    assert client.get("/questions?status_filter=pending").json() == []
+    assert client.get("/questions/search").json() == []
+    assert client.get("/questions/search?status_filter=pending").json() == []
+
+    # A pending question cannot be fetched directly by its ID.
+    response = client.get(f"/questions/{pending['id']}")
+    assert response.status_code == 404
+
 
 def test_unauthorized_users_cannot_perform_moderation(test_setup):
     client, _, student, student_token, _, _ = test_setup
