@@ -172,15 +172,9 @@ def create_question(
 def search_questions(
     topic: str | None = None,
     difficulty: str | None = None,
-    status_filter: QuestionStatus | None = None,
     db: Session = Depends(get_db),
 ):
-    stmt = select(Question)
-    if status_filter:
-        stmt = stmt.where(Question.status == status_filter)
-    else:
-        # Exclude rejected questions from published search results
-        stmt = stmt.where(Question.status != QuestionStatus.REJECTED)
+    stmt = select(Question).where(Question.status == QuestionStatus.APPROVED)
 
     if topic:
         stmt = stmt.where(Question.topic == topic)
@@ -201,7 +195,7 @@ def read_question(
     db: Session = Depends(get_db),
 ):
     question = db.get(Question, question_id)
-    if question is None:
+    if question is None or question.status != QuestionStatus.APPROVED:
         raise HTTPException(status_code=404, detail="Question not found")
     return question
 
@@ -216,17 +210,11 @@ def list_questions(
     topic: str | None = None,
     difficulty: str | None = None,
     creator_id: int | None = None,
-    status_filter: QuestionStatus | None = None,
     limit: int = 50,
     offset: int = 0,
     db: Session = Depends(get_db),
 ):
-    stmt = select(Question)
-    if status_filter:
-        stmt = stmt.where(Question.status == status_filter)
-    else:
-        # Exclude rejected questions from published sets
-        stmt = stmt.where(Question.status != QuestionStatus.REJECTED)
+    stmt = select(Question).where(Question.status == QuestionStatus.APPROVED)
 
     if topic:
         stmt = stmt.where(Question.topic == topic)
