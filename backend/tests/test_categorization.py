@@ -9,7 +9,7 @@ from sqlalchemy.pool import StaticPool
 from app.auth import create_access_token, hash_password
 from app.database import Base, get_db
 from app.main import app
-from app.models import Question, User, UserRole
+from app.models import Question, QuestionStatus, User, UserRole
 
 
 @pytest.fixture
@@ -131,7 +131,7 @@ def test_question_difficulty_classification(test_setup):
 
 
 def test_students_filter_questions_by_category(test_setup):
-    client, _, student1, token1, _, _ = test_setup
+    client, SessionLocal, student1, token1, _, _ = test_setup
 
     q_db_sql = make_question(
         client, token1,
@@ -148,6 +148,11 @@ def test_students_filter_questions_by_category(test_setup):
         subject="Networks", topic="TCP", difficulty="medium",
         question_text="What is TCP handshake?"
     )
+
+    with SessionLocal() as session:
+        for question_id in (q_db_sql["id"], q_db_idx["id"], q_net_tcp["id"]):
+            session.get(Question, question_id).status = QuestionStatus.APPROVED
+        session.commit()
 
     # 1. Filter by subject
     res_subj = client.get("/questions?subject=Databases")
@@ -185,10 +190,16 @@ def test_students_filter_questions_by_category(test_setup):
 
 
 def test_list_categories_summary(test_setup):
-    client, _, student1, token1, _, _ = test_setup
+    client, SessionLocal, student1, token1, _, _ = test_setup
 
-    make_question(client, token1, subject="Physics", topic="Mechanics")
-    make_question(client, token1, subject="Math", topic="Calculus")
+    physics = make_question(client, token1, subject="Physics", topic="Mechanics")
+    math = make_question(client, token1, subject="Math", topic="Calculus")
+    make_question(client, token1, subject="Pending Subject", topic="Pending Topic")
+
+    with SessionLocal() as session:
+        session.get(Question, physics["id"]).status = QuestionStatus.APPROVED
+        session.get(Question, math["id"]).status = QuestionStatus.APPROVED
+        session.commit()
 
     res = client.get("/questions/categories")
     assert res.status_code == 200
@@ -197,6 +208,8 @@ def test_list_categories_summary(test_setup):
     assert "Math" in data["subjects"]
     assert "Mechanics" in data["topics"]
     assert "Calculus" in data["topics"]
+    assert "Pending Subject" not in data["subjects"]
+    assert "Pending Topic" not in data["topics"]
     assert set(data["difficulties"]) == {"easy", "medium", "hard"}
 
 

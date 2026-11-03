@@ -85,9 +85,13 @@ def make_question(client, token, **overrides):
 
 
 def test_students_view_available_questions(test_setup):
-    client, _, student1, t1, _, _, _, _ = test_setup
+    client, _, student1, t1, _, _, _, tm = test_setup
 
     q = make_question(client, t1, question_text="What is quicksort?")
+    client.post(
+        f"/questions/{q['id']}/approve",
+        headers={"Authorization": f"Bearer {tm}"},
+    )
 
     # 1. View available questions in public list
     list_resp = client.get("/questions")
@@ -154,9 +158,13 @@ def test_creators_edit_their_own_questions(test_setup):
 
 
 def test_changes_saved_and_reflected_in_question_bank(test_setup):
-    client, SessionLocal, student1, t1, _, _, _, _ = test_setup
+    client, SessionLocal, student1, t1, _, _, _, tm = test_setup
 
     q = make_question(client, t1, question_text="Before edit")
+    client.post(
+        f"/questions/{q['id']}/approve",
+        headers={"Authorization": f"Bearer {tm}"},
+    )
 
     # Perform edit
     client.patch(
@@ -165,15 +173,22 @@ def test_changes_saved_and_reflected_in_question_bank(test_setup):
         headers={"Authorization": f"Bearer {t1}"},
     )
 
-    # 1. Reflected in single question lookup
-    single_res = client.get(f"/questions/{q['id']}")
-    assert single_res.status_code == 200
-    assert single_res.json()["question_text"] == "After edit - completely reflected"
+    # Creator edits require review again, but the creator can still see them.
+    assert client.get(f"/questions/{q['id']}").status_code == 404
+    own_questions = client.get(
+        "/questions/me",
+        headers={"Authorization": f"Bearer {t1}"},
+    )
+    assert own_questions.status_code == 200
+    own_question = next(item for item in own_questions.json() if item["id"] == q["id"])
+    assert own_question["question_text"] == "After edit - completely reflected"
+    assert own_question["status"] == "pending"
 
     # 2. Reflected in database
     with SessionLocal() as session:
         stored = session.get(Question, q["id"])
         assert stored.question_text == "After edit - completely reflected"
+        assert stored.status == QuestionStatus.PENDING
 
 
 def test_editing_rejected_question_resets_to_pending_for_review(test_setup):
