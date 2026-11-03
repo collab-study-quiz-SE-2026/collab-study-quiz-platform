@@ -9,7 +9,7 @@ from sqlalchemy.pool import StaticPool
 from app.auth import create_access_token, hash_password
 from app.database import Base, get_db
 from app.main import app
-from app.models import Question, User, UserRole
+from app.models import Question, QuestionStatus, User, UserRole
 
 
 @pytest.fixture
@@ -173,7 +173,7 @@ def test_rejects_invalid_difficulty(test_setup):
 
 
 def test_retrieve_questions_list_and_by_id(test_setup):
-    client, _, _, token = test_setup
+    client, SessionLocal, _, token = test_setup
 
     # Create two questions
     q1_resp = client.post(
@@ -188,6 +188,12 @@ def test_retrieve_questions_list_and_by_id(test_setup):
     )
     q1_id = q1_resp.json()["id"]
     q2_id = q2_resp.json()["id"]
+
+    # Only approved questions appear in the public question bank.
+    with SessionLocal() as session:
+        session.get(Question, q1_id).status = QuestionStatus.APPROVED
+        session.get(Question, q2_id).status = QuestionStatus.APPROVED
+        session.commit()
 
     # List all questions
     list_resp = client.get("/questions")
@@ -208,18 +214,23 @@ def test_retrieve_questions_list_and_by_id(test_setup):
 
 
 def test_filter_and_search_questions_by_topic(test_setup):
-    client, _, _, token = test_setup
+    client, SessionLocal, _, token = test_setup
 
-    client.post(
+    networks_response = client.post(
         "/questions",
         json=valid_payload(question_text="What is TCP?", topic="Networks"),
         headers={"Authorization": f"Bearer {token}"},
     )
-    client.post(
+    os_response = client.post(
         "/questions",
         json=valid_payload(question_text="What is a page fault?", topic="OS"),
         headers={"Authorization": f"Bearer {token}"},
     )
+
+    with SessionLocal() as session:
+        session.get(Question, networks_response.json()["id"]).status = QuestionStatus.APPROVED
+        session.get(Question, os_response.json()["id"]).status = QuestionStatus.APPROVED
+        session.commit()
 
     # Filter with query param topic
     resp = client.get("/questions?topic=Networks")
@@ -238,13 +249,17 @@ def test_filter_and_search_questions_by_topic(test_setup):
 
 
 def test_sql_injection_defense_on_search(test_setup):
-    client, _, _, token = test_setup
+    client, SessionLocal, _, token = test_setup
 
-    client.post(
+    response = client.post(
         "/questions",
         json=valid_payload(question_text="Normal Question", topic="Math"),
         headers={"Authorization": f"Bearer {token}"},
     )
+
+    with SessionLocal() as session:
+        session.get(Question, response.json()["id"]).status = QuestionStatus.APPROVED
+        session.commit()
 
     malicious_query = "' OR '1'='1'; DROP TABLE questions; --"
     resp = client.get(f"/questions?topic={malicious_query}")

@@ -10,7 +10,7 @@ from pydantic import (
     model_validator,
 )
 
-from app.models import UserRole
+from app.models import QuestionStatus, UserRole
 
 
 class RegistrationRequest(BaseModel):
@@ -112,6 +112,22 @@ class QuestionCreate(BaseModel):
         return self
 
 
+class ModerateQuestionRequest(BaseModel):
+    action: Literal["approve", "reject"] | None = None
+    status: Literal["approved", "rejected"] | None = None
+    comment: str | None = None
+
+    @model_validator(mode="after")
+    def resolve_decision(self) -> "ModerateQuestionRequest":
+        if self.action is None and self.status is None:
+            raise ValueError(
+                "Must provide either 'action' ('approve'|'reject') or 'status' ('approved'|'rejected')"
+            )
+        if self.action is not None and self.status is None:
+            self.status = "approved" if self.action == "approve" else "rejected"
+        return self
+
+
 class QuestionResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -123,6 +139,10 @@ class QuestionResponse(BaseModel):
     difficulty: str
     explanation: str | None = None
     creator_id: int
+    status: QuestionStatus = QuestionStatus.PENDING
+    moderator_id: int | None = None
+    moderated_at: datetime | None = None
+    moderation_comment: str | None = None
     created_at: datetime
 
 
