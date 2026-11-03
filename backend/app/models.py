@@ -53,7 +53,9 @@ class User(Base):
 class Question(Base):
     __tablename__ = "questions"
     __table_args__ = (
+        Index("ix_questions_subject", "subject"),
         Index("ix_questions_topic", "topic"),
+        Index("ix_questions_difficulty", "difficulty"),
         Index("ix_questions_creator_id", "creator_id"),
         Index("ix_questions_status", "status"),
     )
@@ -62,6 +64,7 @@ class Question(Base):
     question_text: Mapped[str] = mapped_column(Text)
     options: Mapped[list[str]] = mapped_column(JSON)
     correct_answer_index: Mapped[int] = mapped_column(Integer)
+    subject: Mapped[str] = mapped_column(String(100), default="General")
     topic: Mapped[str] = mapped_column(String(100))
     difficulty: Mapped[str] = mapped_column(String(20), default="medium")
     explanation: Mapped[str | None] = mapped_column(Text, nullable=True)

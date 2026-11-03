@@ -6,18 +6,20 @@ import psycopg
 from botocore.exceptions import BotoCoreError, ClientError
 from fastapi import Depends, FastAPI, HTTPException, WebSocket, WebSocketDisconnect, status
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app.auth import create_access_token, get_current_user, hash_password, verify_password
 from app.database import get_db
 from app.models import Question, QuestionStatus, User, UserRole
 from app.schemas import (
+    CategorySummaryResponse,
     LoginRequest,
     MessageResponse,
     ModerateQuestionRequest,
     QuestionCreate,
     QuestionResponse,
+    QuestionUpdate,
     RegistrationRequest,
     RegistrationResponse,
     TokenResponse,
@@ -32,7 +34,7 @@ frontend_origins = [origin.strip() for origin in os.getenv(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=frontend_origins,
-    allow_methods=["GET", "POST", "PATCH"],
+    allow_methods=["GET", "POST", "PATCH", "PUT"],
     allow_headers=["Authorization", "Content-Type"],
 )
 
@@ -151,6 +153,7 @@ def create_question(
         question_text=details.question_text,
         options=details.options,
         correct_answer_index=details.correct_answer_index,
+        subject=details.subject,
         topic=details.topic,
         difficulty=details.difficulty,
         explanation=details.explanation,
@@ -163,6 +166,35 @@ def create_question(
     return question
 
 
+@app.get("/questions/categories", response_model=CategorySummaryResponse)
+@app.get(
+    "/api/v1/questions/categories",
+    response_model=CategorySummaryResponse,
+    include_in_schema=False,
+)
+def list_categories(db: Session = Depends(get_db)):
+    """Return distinct subjects, topics, and difficulty levels in the question bank."""
+    subjects = list(
+        db.scalars(
+            select(Question.subject)
+            .where(Question.status == QuestionStatus.APPROVED)
+            .distinct()
+        ).all()
+    )
+    topics = list(
+        db.scalars(
+            select(Question.topic)
+            .where(Question.status == QuestionStatus.APPROVED)
+            .distinct()
+        ).all()
+    )
+    return CategorySummaryResponse(
+        subjects=sorted(subjects),
+        topics=sorted(topics),
+        difficulties=["easy", "medium", "hard"],
+    )
+
+
 @app.get("/questions/search", response_model=list[QuestionResponse])
 @app.get(
     "/api/v1/questions/search",
@@ -170,14 +202,20 @@ def create_question(
     include_in_schema=False,
 )
 def search_questions(
+    subject: str | None = None,
     topic: str | None = None,
+    category: str | None = None,
     difficulty: str | None = None,
     db: Session = Depends(get_db),
 ):
     stmt = select(Question).where(Question.status == QuestionStatus.APPROVED)
 
+    if subject:
+        stmt = stmt.where(Question.subject == subject)
     if topic:
         stmt = stmt.where(Question.topic == topic)
+    if category:
+        stmt = stmt.where(or_(Question.subject == category, Question.topic == category))
     if difficulty:
         stmt = stmt.where(Question.difficulty == difficulty)
     stmt = stmt.order_by(Question.id.desc())
@@ -207,7 +245,9 @@ def read_question(
     include_in_schema=False,
 )
 def list_questions(
+    subject: str | None = None,
     topic: str | None = None,
+    category: str | None = None,
     difficulty: str | None = None,
     creator_id: int | None = None,
     limit: int = 50,
@@ -216,14 +256,79 @@ def list_questions(
 ):
     stmt = select(Question).where(Question.status == QuestionStatus.APPROVED)
 
+    if subject:
+        stmt = stmt.where(Question.subject == subject)
     if topic:
         stmt = stmt.where(Question.topic == topic)
+    if category:
+        stmt = stmt.where(or_(Question.subject == category, Question.topic == category))
     if difficulty:
         stmt = stmt.where(Question.difficulty == difficulty)
     if creator_id is not None:
         stmt = stmt.where(Question.creator_id == creator_id)
     stmt = stmt.order_by(Question.id.desc()).offset(offset).limit(limit)
     return list(db.scalars(stmt).all())
+
+
+@app.patch("/questions/{question_id}", response_model=QuestionResponse)
+@app.put(
+    "/questions/{question_id}",
+    response_model=QuestionResponse,
+    include_in_schema=False,
+)
+@app.patch(
+    "/api/v1/questions/{question_id}",
+    response_model=QuestionResponse,
+    include_in_schema=False,
+)
+def update_question(
+    question_id: int,
+    details: QuestionUpdate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Update a question. Categorization (subject, topic, difficulty) is preserved unless updated."""
+    question = db.get(Question, question_id)
+    if question is None:
+        raise HTTPException(status_code=404, detail="Question not found")
+
+    if question.creator_id != current_user.id and current_user.role != UserRole.MODERATOR:
+        raise HTTPException(status_code=403, detail="You can only update your own questions")
+
+    # Options and correct_answer_index validation
+    new_options = details.options if details.options is not None else question.options
+    new_correct_index = (
+        details.correct_answer_index
+        if details.correct_answer_index is not None
+        else question.correct_answer_index
+    )
+    if new_correct_index >= len(new_options):
+        raise HTTPException(
+            status_code=422,
+            detail="correct_answer_index must refer to an option",
+        )
+
+    # Content updates
+    if details.question_text is not None:
+        question.question_text = details.question_text
+    if details.options is not None:
+        question.options = details.options
+    if details.correct_answer_index is not None:
+        question.correct_answer_index = details.correct_answer_index
+    if details.explanation is not None:
+        question.explanation = details.explanation
+
+    # Categorization updates (preserved if None in payload)
+    if details.subject is not None:
+        question.subject = details.subject
+    if details.topic is not None:
+        question.topic = details.topic
+    if details.difficulty is not None:
+        question.difficulty = details.difficulty
+
+    db.commit()
+    db.refresh(question)
+    return question
 
 
 # --- Moderation Endpoints (Story #14) ---
@@ -236,8 +341,9 @@ def list_questions(
     include_in_schema=False,
 )
 def review_submitted_questions(
-    status_filter: QuestionStatus | None = None,
+    subject: str | None = None,
     topic: str | None = None,
+    status_filter: QuestionStatus | None = None,
     limit: int = 50,
     offset: int = 0,
     moderator: User = Depends(require_moderator),
@@ -247,6 +353,8 @@ def review_submitted_questions(
     stmt = select(Question)
     if status_filter:
         stmt = stmt.where(Question.status == status_filter)
+    if subject:
+        stmt = stmt.where(Question.subject == subject)
     if topic:
         stmt = stmt.where(Question.topic == topic)
     stmt = stmt.order_by(Question.created_at.desc()).offset(offset).limit(limit)
