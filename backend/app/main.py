@@ -10,10 +10,12 @@ from sqlalchemy.orm import Session
 
 from app.auth import create_access_token, get_current_user, hash_password, verify_password
 from app.database import get_db
-from app.models import User, UserRole
+from app.models import Question, User, UserRole
 from app.schemas import (
     LoginRequest,
     MessageResponse,
+    QuestionCreate,
+    QuestionResponse,
     RegistrationRequest,
     RegistrationResponse,
     TokenResponse,
@@ -116,6 +118,98 @@ def read_user(
     if user is None:
         raise HTTPException(status_code=404, detail="User not found")
     return user
+
+
+@app.post(
+    "/questions",
+    response_model=QuestionResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+@app.post(
+    "/api/v1/questions",
+    response_model=QuestionResponse,
+    status_code=status.HTTP_201_CREATED,
+    include_in_schema=False,
+)
+def create_question(
+    details: QuestionCreate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    question = Question(
+        question_text=details.question_text,
+        options=details.options,
+        correct_answer_index=details.correct_answer_index,
+        topic=details.topic,
+        difficulty=details.difficulty,
+        explanation=details.explanation,
+        creator_id=current_user.id,
+    )
+    db.add(question)
+    db.commit()
+    db.refresh(question)
+    return question
+
+
+@app.get("/questions/search", response_model=list[QuestionResponse])
+@app.get(
+    "/api/v1/questions/search",
+    response_model=list[QuestionResponse],
+    include_in_schema=False,
+)
+def search_questions(
+    topic: str | None = None,
+    difficulty: str | None = None,
+    db: Session = Depends(get_db),
+):
+    stmt = select(Question)
+    if topic:
+        stmt = stmt.where(Question.topic == topic)
+    if difficulty:
+        stmt = stmt.where(Question.difficulty == difficulty)
+    stmt = stmt.order_by(Question.id.desc())
+    return list(db.scalars(stmt).all())
+
+
+@app.get("/questions/{question_id}", response_model=QuestionResponse)
+@app.get(
+    "/api/v1/questions/{question_id}",
+    response_model=QuestionResponse,
+    include_in_schema=False,
+)
+def read_question(
+    question_id: int,
+    db: Session = Depends(get_db),
+):
+    question = db.get(Question, question_id)
+    if question is None:
+        raise HTTPException(status_code=404, detail="Question not found")
+    return question
+
+
+@app.get("/questions", response_model=list[QuestionResponse])
+@app.get(
+    "/api/v1/questions",
+    response_model=list[QuestionResponse],
+    include_in_schema=False,
+)
+def list_questions(
+    topic: str | None = None,
+    difficulty: str | None = None,
+    creator_id: int | None = None,
+    limit: int = 50,
+    offset: int = 0,
+    db: Session = Depends(get_db),
+):
+    stmt = select(Question)
+    if topic:
+        stmt = stmt.where(Question.topic == topic)
+    if difficulty:
+        stmt = stmt.where(Question.difficulty == difficulty)
+    if creator_id is not None:
+        stmt = stmt.where(Question.creator_id == creator_id)
+    stmt = stmt.order_by(Question.id.desc()).offset(offset).limit(limit)
+    return list(db.scalars(stmt).all())
 
 
 @app.websocket("/ws/health")
