@@ -34,7 +34,7 @@ frontend_origins = [origin.strip() for origin in os.getenv(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=frontend_origins,
-    allow_methods=["GET", "POST", "PATCH", "PUT"],
+    allow_methods=["GET", "POST", "PATCH", "PUT", "DELETE"],
     allow_headers=["Authorization", "Content-Type"],
 )
 
@@ -166,6 +166,30 @@ def create_question(
     return question
 
 
+@app.get("/questions/me", response_model=list[QuestionResponse])
+@app.get("/questions/my", response_model=list[QuestionResponse], include_in_schema=False)
+@app.get("/api/v1/questions/me", response_model=list[QuestionResponse], include_in_schema=False)
+def list_my_questions(
+    subject: str | None = None,
+    topic: str | None = None,
+    status_filter: QuestionStatus | None = None,
+    limit: int = 50,
+    offset: int = 0,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """View questions contributed by the currently authenticated student."""
+    stmt = select(Question).where(Question.creator_id == current_user.id)
+    if status_filter:
+        stmt = stmt.where(Question.status == status_filter)
+    if subject:
+        stmt = stmt.where(Question.subject == subject)
+    if topic:
+        stmt = stmt.where(Question.topic == topic)
+    stmt = stmt.order_by(Question.created_at.desc(), Question.id.desc()).offset(offset).limit(limit)
+    return list(db.scalars(stmt).all())
+
+
 @app.get("/questions/categories", response_model=CategorySummaryResponse)
 @app.get(
     "/api/v1/questions/categories",
@@ -287,7 +311,7 @@ def update_question(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Update a question. Categorization (subject, topic, difficulty) is preserved unless updated."""
+    """Update a question. Authorized to the question creator or a moderator."""
     question = db.get(Question, question_id)
     if question is None:
         raise HTTPException(status_code=404, detail="Question not found")
@@ -326,9 +350,40 @@ def update_question(
     if details.difficulty is not None:
         question.difficulty = details.difficulty
 
+    # Creator edits to reviewed questions need moderator review again.
+    if question.status != QuestionStatus.PENDING and current_user.role != UserRole.MODERATOR:
+        question.status = QuestionStatus.PENDING
+        question.moderator_id = None
+        question.moderated_at = None
+        question.moderation_comment = None
+
     db.commit()
     db.refresh(question)
     return question
+
+
+@app.delete("/questions/{question_id}", response_model=MessageResponse)
+@app.delete(
+    "/api/v1/questions/{question_id}",
+    response_model=MessageResponse,
+    include_in_schema=False,
+)
+def delete_question(
+    question_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Delete a question. Authorized to the question creator or a moderator."""
+    question = db.get(Question, question_id)
+    if question is None:
+        raise HTTPException(status_code=404, detail="Question not found")
+
+    if question.creator_id != current_user.id and current_user.role != UserRole.MODERATOR:
+        raise HTTPException(status_code=403, detail="You can only delete your own questions")
+
+    db.delete(question)
+    db.commit()
+    return {"message": "Question deleted successfully"}
 
 
 # --- Moderation Endpoints (Story #14) ---
