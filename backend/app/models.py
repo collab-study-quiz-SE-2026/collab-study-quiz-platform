@@ -28,6 +28,13 @@ class QuestionStatus(str, Enum):
     REJECTED = "rejected"
 
 
+class QuizStatus(str, Enum):
+    DRAFT = "draft"
+    PUBLISHED = "published"
+    LIVE = "live"
+    COMPLETED = "completed"
+
+
 class User(Base):
     __tablename__ = "users"
     __table_args__ = (
@@ -47,6 +54,11 @@ class User(Base):
         "Question",
         foreign_keys="Question.creator_id",
         back_populates="creator",
+    )
+    quizzes: Mapped[list["Quiz"]] = relationship(
+        "Quiz",
+        foreign_keys="Quiz.host_id",
+        back_populates="host",
     )
 
 
@@ -93,3 +105,55 @@ class Question(Base):
         "User",
         foreign_keys=[moderator_id],
     )
+
+
+class Quiz(Base):
+    __tablename__ = "quizzes"
+    __table_args__ = (
+        UniqueConstraint("room_code"),
+        Index("ix_quizzes_host_id", "host_id"),
+        Index("ix_quizzes_room_code", "room_code"),
+        Index("ix_quizzes_status", "status"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    title: Mapped[str] = mapped_column(String(200))
+    description: Mapped[str] = mapped_column(Text, default="")
+    duration_minutes: Mapped[int] = mapped_column(Integer)
+    max_attempts: Mapped[int] = mapped_column(Integer, default=1)
+    room_code: Mapped[str] = mapped_column(String(6), unique=True)
+    status: Mapped[QuizStatus] = mapped_column(
+        SqlEnum(QuizStatus, name="quiz_status"), default=QuizStatus.PUBLISHED
+    )
+    host_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC)
+    )
+    started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    host: Mapped["User"] = relationship(
+        "User", foreign_keys=[host_id], back_populates="quizzes"
+    )
+    questions: Mapped[list["QuizQuestion"]] = relationship(
+        "QuizQuestion", back_populates="quiz", cascade="all, delete-orphan",
+        order_by="QuizQuestion.position",
+    )
+
+
+class QuizQuestion(Base):
+    __tablename__ = "quiz_questions"
+    __table_args__ = (
+        UniqueConstraint("quiz_id", "question_id"),
+        UniqueConstraint("quiz_id", "position"),
+        Index("ix_quiz_questions_question_id", "question_id"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    quiz_id: Mapped[int] = mapped_column(ForeignKey("quizzes.id", ondelete="CASCADE"))
+    question_id: Mapped[int] = mapped_column(ForeignKey("questions.id", ondelete="RESTRICT"))
+    position: Mapped[int] = mapped_column(Integer)
+
+    quiz: Mapped["Quiz"] = relationship("Quiz", back_populates="questions")
+    question: Mapped["Question"] = relationship("Question")

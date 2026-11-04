@@ -10,7 +10,7 @@ from pydantic import (
     model_validator,
 )
 
-from app.models import QuestionStatus, UserRole
+from app.models import QuestionStatus, QuizStatus, UserRole
 
 
 class RegistrationRequest(BaseModel):
@@ -67,6 +67,31 @@ class QuizCreate(BaseModel):
         if len(ids) != len(set(ids)):
             raise ValueError("Question IDs must be unique")
         return ids
+
+
+class QuizQuestionResponse(BaseModel):
+    id: int
+    question_text: str
+    options: list[str]
+    subject: str
+    topic: str
+    difficulty: str
+
+
+class QuizResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    title: str
+    description: str
+    duration_minutes: int
+    max_attempts: int
+    room_code: str
+    status: QuizStatus
+    host_id: int
+    created_at: datetime
+    started_at: datetime | None
+    questions: list[QuizQuestionResponse]
 
 
 class QuestionCreate(BaseModel):

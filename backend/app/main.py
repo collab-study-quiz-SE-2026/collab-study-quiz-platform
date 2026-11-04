@@ -7,11 +7,11 @@ from botocore.exceptions import BotoCoreError, ClientError
 from fastapi import Depends, FastAPI, HTTPException, WebSocket, WebSocketDisconnect, status
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import or_, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from app.auth import create_access_token, get_current_user, hash_password, verify_password
 from app.database import get_db
-from app.models import Question, QuestionStatus, User, UserRole
+from app.models import Question, QuestionStatus, Quiz, QuizQuestion, QuizStatus, User, UserRole
 from app.schemas import (
     CategorySummaryResponse,
     LoginRequest,
@@ -20,6 +20,8 @@ from app.schemas import (
     QuestionCreate,
     QuestionResponse,
     QuestionUpdate,
+    QuizCreate,
+    QuizResponse,
     RegistrationRequest,
     RegistrationResponse,
     TokenResponse,
@@ -37,6 +39,44 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PATCH", "PUT", "DELETE"],
     allow_headers=["Authorization", "Content-Type"],
 )
+
+
+def quiz_response(quiz: Quiz) -> dict:
+    return {
+        "id": quiz.id,
+        "title": quiz.title,
+        "description": quiz.description,
+        "duration_minutes": quiz.duration_minutes,
+        "max_attempts": quiz.max_attempts,
+        "room_code": quiz.room_code,
+        "status": quiz.status,
+        "host_id": quiz.host_id,
+        "created_at": quiz.created_at,
+        "started_at": quiz.started_at,
+        "questions": [
+            {
+                "id": link.question.id,
+                "question_text": link.question.question_text,
+                "options": link.question.options,
+                "subject": link.question.subject,
+                "topic": link.question.topic,
+                "difficulty": link.question.difficulty,
+            }
+            for link in quiz.questions
+        ],
+    }
+
+
+def generate_room_code(db: Session) -> str:
+    import secrets
+    import string
+
+    alphabet = string.ascii_uppercase + string.digits
+    for _ in range(10):
+        code = "".join(secrets.choice(alphabet) for _ in range(6))
+        if db.scalar(select(Quiz).where(Quiz.room_code == code)) is None:
+            return code
+    raise HTTPException(status_code=503, detail="Could not allocate a quiz room")
 
 
 def require_moderator(current_user: User = Depends(get_current_user)) -> User:
@@ -116,6 +156,82 @@ def logout(
 @app.get("/auth/me", response_model=UserResponse)
 def read_current_user(current_user: User = Depends(get_current_user)):
     return current_user
+
+
+@app.post("/quizzes", response_model=QuizResponse, status_code=status.HTTP_201_CREATED)
+@app.post(
+    "/api/v1/quizzes",
+    response_model=QuizResponse,
+    status_code=status.HTTP_201_CREATED,
+    include_in_schema=False,
+)
+def create_quiz(
+    details: QuizCreate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    questions = list(
+        db.scalars(
+            select(Question).where(
+                Question.id.in_(details.question_ids),
+                Question.status == QuestionStatus.APPROVED,
+            )
+        ).all()
+    )
+    questions_by_id = {question.id: question for question in questions}
+    missing_ids = [question_id for question_id in details.question_ids if question_id not in questions_by_id]
+    if missing_ids:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Approved questions not found: {missing_ids}",
+        )
+
+    quiz = Quiz(
+        title=details.title,
+        description=details.description,
+        duration_minutes=details.duration_minutes,
+        max_attempts=details.max_attempts,
+        room_code=generate_room_code(db),
+        status=QuizStatus.PUBLISHED,
+        host_id=current_user.id,
+    )
+    quiz.questions = [
+        QuizQuestion(question=questions_by_id[question_id], position=position)
+        for position, question_id in enumerate(details.question_ids)
+    ]
+    db.add(quiz)
+    db.commit()
+    db.refresh(quiz)
+    return quiz_response(quiz)
+
+
+@app.get("/quizzes/{quiz_id}", response_model=QuizResponse)
+@app.get(
+    "/api/v1/quizzes/{quiz_id}",
+    response_model=QuizResponse,
+    include_in_schema=False,
+)
+def read_quiz(quiz_id: int, db: Session = Depends(get_db)):
+    quiz = db.scalar(
+        select(Quiz)
+        .options(selectinload(Quiz.questions).selectinload(QuizQuestion.question))
+        .where(Quiz.id == quiz_id)
+    )
+    if quiz is None or quiz.status == QuizStatus.DRAFT:
+        raise HTTPException(status_code=404, detail="Quiz not found")
+    return quiz_response(quiz)
+
+
+@app.get("/quizzes", response_model=list[QuizResponse])
+@app.get("/api/v1/quizzes", response_model=list[QuizResponse], include_in_schema=False)
+def list_quizzes(db: Session = Depends(get_db)):
+    quizzes = db.scalars(
+        select(Quiz)
+        .options(selectinload(Quiz.questions).selectinload(QuizQuestion.question))
+        .where(Quiz.status.in_([QuizStatus.PUBLISHED, QuizStatus.LIVE]))
+        .order_by(Quiz.created_at.desc(), Quiz.id.desc())
+    ).all()
+    return [quiz_response(quiz) for quiz in quizzes]
 
 
 @app.get("/auth/users/{user_id}", response_model=UserResponse)
