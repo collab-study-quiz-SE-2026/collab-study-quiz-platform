@@ -10,7 +10,7 @@ from pydantic import (
     model_validator,
 )
 
-from app.models import QuestionStatus, QuizStatus, UserRole
+from app.models import AttemptStatus, QuestionStatus, QuizStatus, UserRole
 
 
 class RegistrationRequest(BaseModel):
@@ -91,6 +91,25 @@ class QuizResponse(BaseModel):
     host_id: int
     created_at: datetime
     started_at: datetime | None
+    questions: list[QuizQuestionResponse]
+
+
+class AnswerSubmission(BaseModel):
+    question_id: int = Field(gt=0)
+    answer_index: int = Field(ge=0)
+    time_spent_seconds: int = Field(ge=0, le=86400)
+
+
+class QuizAttemptResponse(BaseModel):
+    id: int
+    quiz_id: int
+    student_id: int
+    status: AttemptStatus
+    score: int | None
+    started_at: datetime
+    completed_at: datetime | None
+    answered_question_ids: list[int]
+    question_timings: dict[str, int]
     questions: list[QuizQuestionResponse]
 
 

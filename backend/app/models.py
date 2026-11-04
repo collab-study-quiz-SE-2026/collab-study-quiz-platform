@@ -35,6 +35,12 @@ class QuizStatus(str, Enum):
     COMPLETED = "completed"
 
 
+class AttemptStatus(str, Enum):
+    ACTIVE = "active"
+    COMPLETED = "completed"
+    EXPIRED = "expired"
+
+
 class User(Base):
     __tablename__ = "users"
     __table_args__ = (
@@ -157,3 +163,31 @@ class QuizQuestion(Base):
 
     quiz: Mapped["Quiz"] = relationship("Quiz", back_populates="questions")
     question: Mapped["Question"] = relationship("Question")
+
+
+class QuizAttempt(Base):
+    __tablename__ = "quiz_attempts"
+    __table_args__ = (
+        Index("ix_quiz_attempts_quiz_id", "quiz_id"),
+        Index("ix_quiz_attempts_student_id", "student_id"),
+        Index("ix_quiz_attempts_status", "status"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    quiz_id: Mapped[int] = mapped_column(ForeignKey("quizzes.id", ondelete="CASCADE"))
+    student_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    status: Mapped[AttemptStatus] = mapped_column(
+        SqlEnum(AttemptStatus, name="attempt_status"), default=AttemptStatus.ACTIVE
+    )
+    answers: Mapped[dict] = mapped_column(JSON, default=dict)
+    question_timings: Mapped[dict] = mapped_column(JSON, default=dict)
+    score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC)
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    quiz: Mapped["Quiz"] = relationship("Quiz")
+    student: Mapped["User"] = relationship("User")

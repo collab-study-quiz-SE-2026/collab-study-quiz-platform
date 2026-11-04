@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 import os
 from contextlib import closing
 
@@ -11,7 +11,17 @@ from sqlalchemy.orm import Session, selectinload
 
 from app.auth import create_access_token, get_current_user, hash_password, verify_password
 from app.database import get_db
-from app.models import Question, QuestionStatus, Quiz, QuizQuestion, QuizStatus, User, UserRole
+from app.models import (
+    AttemptStatus,
+    Question,
+    QuestionStatus,
+    Quiz,
+    QuizAttempt,
+    QuizQuestion,
+    QuizStatus,
+    User,
+    UserRole,
+)
 from app.schemas import (
     CategorySummaryResponse,
     LoginRequest,
@@ -20,7 +30,9 @@ from app.schemas import (
     QuestionCreate,
     QuestionResponse,
     QuestionUpdate,
+    AnswerSubmission,
     QuizCreate,
+    QuizAttemptResponse,
     QuizResponse,
     RegistrationRequest,
     RegistrationResponse,
@@ -77,6 +89,58 @@ def generate_room_code(db: Session) -> str:
         if db.scalar(select(Quiz).where(Quiz.room_code == code)) is None:
             return code
     raise HTTPException(status_code=503, detail="Could not allocate a quiz room")
+
+
+def attempt_response(attempt: QuizAttempt) -> dict:
+    return {
+        "id": attempt.id,
+        "quiz_id": attempt.quiz_id,
+        "student_id": attempt.student_id,
+        "status": attempt.status,
+        "score": attempt.score,
+        "started_at": attempt.started_at,
+        "completed_at": attempt.completed_at,
+        "answered_question_ids": [int(question_id) for question_id in attempt.answers],
+        "question_timings": attempt.question_timings,
+        "questions": [
+            {
+                "id": link.question.id,
+                "question_text": link.question.question_text,
+                "options": link.question.options,
+                "subject": link.question.subject,
+                "topic": link.question.topic,
+                "difficulty": link.question.difficulty,
+            }
+            for link in attempt.quiz.questions
+        ],
+    }
+
+
+def load_quiz(db: Session, quiz_id: int) -> Quiz | None:
+    return db.scalar(
+        select(Quiz)
+        .options(selectinload(Quiz.questions).selectinload(QuizQuestion.question))
+        .where(Quiz.id == quiz_id)
+    )
+
+
+def active_attempt(db: Session, quiz_id: int, student_id: int) -> QuizAttempt | None:
+    return db.scalar(
+        select(QuizAttempt)
+        .options(selectinload(QuizAttempt.quiz).selectinload(Quiz.questions).selectinload(QuizQuestion.question))
+        .where(
+            QuizAttempt.quiz_id == quiz_id,
+            QuizAttempt.student_id == student_id,
+            QuizAttempt.status == AttemptStatus.ACTIVE,
+        )
+    )
+
+
+def attempt_expired(attempt: QuizAttempt, now: datetime) -> bool:
+    started_at = attempt.started_at
+    if started_at.tzinfo is None:
+        started_at = started_at.replace(tzinfo=UTC)
+    return now > started_at + timedelta(minutes=attempt.quiz.duration_minutes)
 
 
 def require_moderator(current_user: User = Depends(get_current_user)) -> User:
@@ -232,6 +296,154 @@ def list_quizzes(db: Session = Depends(get_db)):
         .order_by(Quiz.created_at.desc(), Quiz.id.desc())
     ).all()
     return [quiz_response(quiz) for quiz in quizzes]
+
+
+def start_attempt(
+    quiz: Quiz,
+    current_user: User,
+    db: Session,
+) -> dict:
+    now = datetime.now(UTC)
+    if quiz.status not in (QuizStatus.PUBLISHED, QuizStatus.LIVE):
+        raise HTTPException(status_code=409, detail="Quiz is not available")
+    existing = active_attempt(db, quiz.id, current_user.id)
+    if existing is not None:
+        return attempt_response(existing)
+    count = db.query(QuizAttempt).filter(
+        QuizAttempt.quiz_id == quiz.id,
+        QuizAttempt.student_id == current_user.id,
+        QuizAttempt.status.in_([AttemptStatus.COMPLETED, AttemptStatus.EXPIRED]),
+    ).count()
+    if count >= quiz.max_attempts:
+        raise HTTPException(status_code=409, detail="Maximum quiz attempts reached")
+    attempt = QuizAttempt(quiz=quiz, student=current_user, started_at=now)
+    db.add(attempt)
+    db.commit()
+    db.refresh(attempt)
+    return attempt_response(attempt)
+
+
+@app.post("/quizzes/{quiz_id}/sessions", response_model=QuizAttemptResponse)
+@app.post(
+    "/api/v1/quizzes/{quiz_id}/sessions",
+    response_model=QuizAttemptResponse,
+    include_in_schema=False,
+)
+def join_quiz(
+    quiz_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    quiz = load_quiz(db, quiz_id)
+    if quiz is None:
+        raise HTTPException(status_code=404, detail="Quiz not found")
+    return start_attempt(quiz, current_user, db)
+
+
+@app.post("/quizzes/join/{room_code}", response_model=QuizAttemptResponse)
+@app.post(
+    "/api/v1/quizzes/join/{room_code}",
+    response_model=QuizAttemptResponse,
+    include_in_schema=False,
+)
+def join_quiz_by_room(
+    room_code: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    quiz = db.scalar(select(Quiz).where(Quiz.room_code == room_code.upper()))
+    if quiz is None:
+        raise HTTPException(status_code=404, detail="Quiz room not found")
+    quiz = load_quiz(db, quiz.id)
+    return start_attempt(quiz, current_user, db)
+
+
+@app.post("/quiz-sessions/{attempt_id}/answers", response_model=QuizAttemptResponse)
+@app.post(
+    "/api/v1/quiz-sessions/{attempt_id}/answers",
+    response_model=QuizAttemptResponse,
+    include_in_schema=False,
+)
+def submit_answer(
+    attempt_id: int,
+    answer: AnswerSubmission,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    attempt = db.scalar(
+        select(QuizAttempt)
+        .options(selectinload(QuizAttempt.quiz).selectinload(Quiz.questions).selectinload(QuizQuestion.question))
+        .where(QuizAttempt.id == attempt_id)
+    )
+    if attempt is None:
+        raise HTTPException(status_code=404, detail="Quiz session not found")
+    if attempt.student_id != current_user.id:
+        raise HTTPException(status_code=403, detail="You can only submit answers to your own session")
+    if attempt.status != AttemptStatus.ACTIVE:
+        raise HTTPException(status_code=409, detail="Quiz session is no longer active")
+    now = datetime.now(UTC)
+    if attempt_expired(attempt, now):
+        attempt.status = AttemptStatus.EXPIRED
+        attempt.completed_at = now
+        db.commit()
+        raise HTTPException(status_code=409, detail="Quiz time limit has expired")
+    selected = next(
+        (link.question for link in attempt.quiz.questions if link.question.id == answer.question_id),
+        None,
+    )
+    if selected is None:
+        raise HTTPException(status_code=422, detail="Question is not part of this quiz")
+    if answer.answer_index >= len(selected.options):
+        raise HTTPException(status_code=422, detail="Answer index is invalid")
+    attempt.answers = {**attempt.answers, str(answer.question_id): answer.answer_index}
+    attempt.question_timings = {
+        **attempt.question_timings,
+        str(answer.question_id): answer.time_spent_seconds,
+    }
+    db.commit()
+    db.refresh(attempt)
+    return attempt_response(attempt)
+
+
+@app.post("/quiz-sessions/{attempt_id}/complete", response_model=QuizAttemptResponse)
+@app.post(
+    "/api/v1/quiz-sessions/{attempt_id}/complete",
+    response_model=QuizAttemptResponse,
+    include_in_schema=False,
+)
+def complete_quiz(
+    attempt_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    attempt = db.scalar(
+        select(QuizAttempt)
+        .options(selectinload(QuizAttempt.quiz).selectinload(Quiz.questions).selectinload(QuizQuestion.question))
+        .where(QuizAttempt.id == attempt_id)
+    )
+    if attempt is None:
+        raise HTTPException(status_code=404, detail="Quiz session not found")
+    if attempt.student_id != current_user.id:
+        raise HTTPException(status_code=403, detail="You can only complete your own session")
+    if attempt.status != AttemptStatus.ACTIVE:
+        raise HTTPException(status_code=409, detail="Quiz session is no longer active")
+    now = datetime.now(UTC)
+    if attempt_expired(attempt, now):
+        attempt.status = AttemptStatus.EXPIRED
+        score = 0
+    else:
+        correct = sum(
+            int(str(link.question.id) in attempt.answers
+                and attempt.answers[str(link.question.id)] == link.question.correct_answer_index)
+            for link in attempt.quiz.questions
+        )
+        score = round(correct * 100 / len(attempt.quiz.questions))
+        attempt.status = AttemptStatus.COMPLETED
+    attempt.score = score
+    attempt.completed_at = now
+    db.commit()
+    db.refresh(attempt)
+    return attempt_response(attempt)
 
 
 @app.get("/auth/users/{user_id}", response_model=UserResponse)
