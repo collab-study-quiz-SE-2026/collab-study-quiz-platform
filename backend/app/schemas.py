@@ -113,6 +113,20 @@ class QuizAttemptResponse(BaseModel):
     questions: list[QuizQuestionResponse]
 
 
+class QuizAttemptHistoryResponse(BaseModel):
+    id: int
+    quiz_id: int
+    quiz_title: str
+    student_id: int
+    status: AttemptStatus
+    score: int | None
+    answers: dict[str, int]
+    question_timings: dict[str, int]
+    started_at: datetime
+    completed_at: datetime | None
+    duration_seconds: int | None
+
+
 class QuestionCreate(BaseModel):
     question_text: str = Field(min_length=1)
     options: list[str] = Field(min_length=4, max_length=4)

@@ -33,6 +33,7 @@ from app.schemas import (
     AnswerSubmission,
     QuizCreate,
     QuizAttemptResponse,
+    QuizAttemptHistoryResponse,
     QuizResponse,
     RegistrationRequest,
     RegistrationResponse,
@@ -444,6 +445,69 @@ def complete_quiz(
     db.commit()
     db.refresh(attempt)
     return attempt_response(attempt)
+
+
+def attempt_history_response(attempt: QuizAttempt) -> dict:
+    duration_seconds = None
+    if attempt.completed_at is not None:
+        started_at = attempt.started_at
+        completed_at = attempt.completed_at
+        if started_at.tzinfo is None:
+            started_at = started_at.replace(tzinfo=UTC)
+        if completed_at.tzinfo is None:
+            completed_at = completed_at.replace(tzinfo=UTC)
+        duration_seconds = max(0, round((completed_at - started_at).total_seconds()))
+    return {
+        "id": attempt.id,
+        "quiz_id": attempt.quiz_id,
+        "quiz_title": attempt.quiz.title,
+        "student_id": attempt.student_id,
+        "status": attempt.status,
+        "score": attempt.score,
+        "answers": attempt.answers,
+        "question_timings": attempt.question_timings,
+        "started_at": attempt.started_at,
+        "completed_at": attempt.completed_at,
+        "duration_seconds": duration_seconds,
+    }
+
+
+@app.get("/quiz-attempts/me", response_model=list[QuizAttemptHistoryResponse])
+@app.get(
+    "/api/v1/quiz-attempts/me",
+    response_model=list[QuizAttemptHistoryResponse],
+    include_in_schema=False,
+)
+def list_my_attempt_history(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    attempts = db.scalars(
+        select(QuizAttempt)
+        .options(selectinload(QuizAttempt.quiz))
+        .where(
+            QuizAttempt.student_id == current_user.id,
+            QuizAttempt.status.in_([AttemptStatus.COMPLETED, AttemptStatus.EXPIRED]),
+        )
+        .order_by(QuizAttempt.completed_at.desc(), QuizAttempt.id.desc())
+    ).all()
+    return [attempt_history_response(attempt) for attempt in attempts]
+
+
+@app.get("/users/{student_id}/quiz-attempts", response_model=list[QuizAttemptHistoryResponse])
+@app.get(
+    "/api/v1/users/{student_id}/quiz-attempts",
+    response_model=list[QuizAttemptHistoryResponse],
+    include_in_schema=False,
+)
+def list_student_attempt_history(
+    student_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if current_user.id != student_id:
+        raise HTTPException(status_code=403, detail="You can only access your own attempt history")
+    return list_my_attempt_history(current_user=current_user, db=db)
 
 
 @app.get("/auth/users/{user_id}", response_model=UserResponse)
