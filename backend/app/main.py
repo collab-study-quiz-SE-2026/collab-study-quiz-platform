@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 import os
 from contextlib import closing
 
@@ -7,11 +7,21 @@ from botocore.exceptions import BotoCoreError, ClientError
 from fastapi import Depends, FastAPI, HTTPException, WebSocket, WebSocketDisconnect, status
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import or_, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from app.auth import create_access_token, get_current_user, hash_password, verify_password
 from app.database import get_db
-from app.models import Question, QuestionStatus, User, UserRole
+from app.models import (
+    AttemptStatus,
+    Question,
+    QuestionStatus,
+    Quiz,
+    QuizAttempt,
+    QuizQuestion,
+    QuizStatus,
+    User,
+    UserRole,
+)
 from app.schemas import (
     CategorySummaryResponse,
     LoginRequest,
@@ -20,6 +30,11 @@ from app.schemas import (
     QuestionCreate,
     QuestionResponse,
     QuestionUpdate,
+    AnswerSubmission,
+    QuizCreate,
+    QuizAttemptResponse,
+    QuizAttemptHistoryResponse,
+    QuizResponse,
     RegistrationRequest,
     RegistrationResponse,
     TokenResponse,
@@ -37,6 +52,96 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PATCH", "PUT", "DELETE"],
     allow_headers=["Authorization", "Content-Type"],
 )
+
+
+def quiz_response(quiz: Quiz) -> dict:
+    return {
+        "id": quiz.id,
+        "title": quiz.title,
+        "description": quiz.description,
+        "duration_minutes": quiz.duration_minutes,
+        "max_attempts": quiz.max_attempts,
+        "room_code": quiz.room_code,
+        "status": quiz.status,
+        "host_id": quiz.host_id,
+        "created_at": quiz.created_at,
+        "started_at": quiz.started_at,
+        "questions": [
+            {
+                "id": link.question.id,
+                "question_text": link.question.question_text,
+                "options": link.question.options,
+                "subject": link.question.subject,
+                "topic": link.question.topic,
+                "difficulty": link.question.difficulty,
+            }
+            for link in quiz.questions
+        ],
+    }
+
+
+def generate_room_code(db: Session) -> str:
+    import secrets
+    import string
+
+    alphabet = string.ascii_uppercase + string.digits
+    for _ in range(10):
+        code = "".join(secrets.choice(alphabet) for _ in range(6))
+        if db.scalar(select(Quiz).where(Quiz.room_code == code)) is None:
+            return code
+    raise HTTPException(status_code=503, detail="Could not allocate a quiz room")
+
+
+def attempt_response(attempt: QuizAttempt) -> dict:
+    return {
+        "id": attempt.id,
+        "quiz_id": attempt.quiz_id,
+        "student_id": attempt.student_id,
+        "status": attempt.status,
+        "score": attempt.score,
+        "started_at": attempt.started_at,
+        "completed_at": attempt.completed_at,
+        "answered_question_ids": [int(question_id) for question_id in attempt.answers],
+        "question_timings": attempt.question_timings,
+        "questions": [
+            {
+                "id": link.question.id,
+                "question_text": link.question.question_text,
+                "options": link.question.options,
+                "subject": link.question.subject,
+                "topic": link.question.topic,
+                "difficulty": link.question.difficulty,
+            }
+            for link in attempt.quiz.questions
+        ],
+    }
+
+
+def load_quiz(db: Session, quiz_id: int) -> Quiz | None:
+    return db.scalar(
+        select(Quiz)
+        .options(selectinload(Quiz.questions).selectinload(QuizQuestion.question))
+        .where(Quiz.id == quiz_id)
+    )
+
+
+def active_attempt(db: Session, quiz_id: int, student_id: int) -> QuizAttempt | None:
+    return db.scalar(
+        select(QuizAttempt)
+        .options(selectinload(QuizAttempt.quiz).selectinload(Quiz.questions).selectinload(QuizQuestion.question))
+        .where(
+            QuizAttempt.quiz_id == quiz_id,
+            QuizAttempt.student_id == student_id,
+            QuizAttempt.status == AttemptStatus.ACTIVE,
+        )
+    )
+
+
+def attempt_expired(attempt: QuizAttempt, now: datetime) -> bool:
+    started_at = attempt.started_at
+    if started_at.tzinfo is None:
+        started_at = started_at.replace(tzinfo=UTC)
+    return now > started_at + timedelta(minutes=attempt.quiz.duration_minutes)
 
 
 def require_moderator(current_user: User = Depends(get_current_user)) -> User:
@@ -116,6 +221,293 @@ def logout(
 @app.get("/auth/me", response_model=UserResponse)
 def read_current_user(current_user: User = Depends(get_current_user)):
     return current_user
+
+
+@app.post("/quizzes", response_model=QuizResponse, status_code=status.HTTP_201_CREATED)
+@app.post(
+    "/api/v1/quizzes",
+    response_model=QuizResponse,
+    status_code=status.HTTP_201_CREATED,
+    include_in_schema=False,
+)
+def create_quiz(
+    details: QuizCreate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    questions = list(
+        db.scalars(
+            select(Question).where(
+                Question.id.in_(details.question_ids),
+                Question.status == QuestionStatus.APPROVED,
+            )
+        ).all()
+    )
+    questions_by_id = {question.id: question for question in questions}
+    missing_ids = [question_id for question_id in details.question_ids if question_id not in questions_by_id]
+    if missing_ids:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Approved questions not found: {missing_ids}",
+        )
+
+    quiz = Quiz(
+        title=details.title,
+        description=details.description,
+        duration_minutes=details.duration_minutes,
+        max_attempts=details.max_attempts,
+        room_code=generate_room_code(db),
+        status=QuizStatus.PUBLISHED,
+        host_id=current_user.id,
+    )
+    quiz.questions = [
+        QuizQuestion(question=questions_by_id[question_id], position=position)
+        for position, question_id in enumerate(details.question_ids)
+    ]
+    db.add(quiz)
+    db.commit()
+    db.refresh(quiz)
+    return quiz_response(quiz)
+
+
+@app.get("/quizzes/{quiz_id}", response_model=QuizResponse)
+@app.get(
+    "/api/v1/quizzes/{quiz_id}",
+    response_model=QuizResponse,
+    include_in_schema=False,
+)
+def read_quiz(quiz_id: int, db: Session = Depends(get_db)):
+    quiz = db.scalar(
+        select(Quiz)
+        .options(selectinload(Quiz.questions).selectinload(QuizQuestion.question))
+        .where(Quiz.id == quiz_id)
+    )
+    if quiz is None or quiz.status == QuizStatus.DRAFT:
+        raise HTTPException(status_code=404, detail="Quiz not found")
+    return quiz_response(quiz)
+
+
+@app.get("/quizzes", response_model=list[QuizResponse])
+@app.get("/api/v1/quizzes", response_model=list[QuizResponse], include_in_schema=False)
+def list_quizzes(db: Session = Depends(get_db)):
+    quizzes = db.scalars(
+        select(Quiz)
+        .options(selectinload(Quiz.questions).selectinload(QuizQuestion.question))
+        .where(Quiz.status.in_([QuizStatus.PUBLISHED, QuizStatus.LIVE]))
+        .order_by(Quiz.created_at.desc(), Quiz.id.desc())
+    ).all()
+    return [quiz_response(quiz) for quiz in quizzes]
+
+
+def start_attempt(
+    quiz: Quiz,
+    current_user: User,
+    db: Session,
+) -> dict:
+    now = datetime.now(UTC)
+    if quiz.status not in (QuizStatus.PUBLISHED, QuizStatus.LIVE):
+        raise HTTPException(status_code=409, detail="Quiz is not available")
+    existing = active_attempt(db, quiz.id, current_user.id)
+    if existing is not None:
+        return attempt_response(existing)
+    count = db.query(QuizAttempt).filter(
+        QuizAttempt.quiz_id == quiz.id,
+        QuizAttempt.student_id == current_user.id,
+        QuizAttempt.status.in_([AttemptStatus.COMPLETED, AttemptStatus.EXPIRED]),
+    ).count()
+    if count >= quiz.max_attempts:
+        raise HTTPException(status_code=409, detail="Maximum quiz attempts reached")
+    attempt = QuizAttempt(quiz=quiz, student=current_user, started_at=now)
+    db.add(attempt)
+    db.commit()
+    db.refresh(attempt)
+    return attempt_response(attempt)
+
+
+@app.post("/quizzes/{quiz_id}/sessions", response_model=QuizAttemptResponse)
+@app.post(
+    "/api/v1/quizzes/{quiz_id}/sessions",
+    response_model=QuizAttemptResponse,
+    include_in_schema=False,
+)
+def join_quiz(
+    quiz_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    quiz = load_quiz(db, quiz_id)
+    if quiz is None:
+        raise HTTPException(status_code=404, detail="Quiz not found")
+    return start_attempt(quiz, current_user, db)
+
+
+@app.post("/quizzes/join/{room_code}", response_model=QuizAttemptResponse)
+@app.post(
+    "/api/v1/quizzes/join/{room_code}",
+    response_model=QuizAttemptResponse,
+    include_in_schema=False,
+)
+def join_quiz_by_room(
+    room_code: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    quiz = db.scalar(select(Quiz).where(Quiz.room_code == room_code.upper()))
+    if quiz is None:
+        raise HTTPException(status_code=404, detail="Quiz room not found")
+    quiz = load_quiz(db, quiz.id)
+    return start_attempt(quiz, current_user, db)
+
+
+@app.post("/quiz-sessions/{attempt_id}/answers", response_model=QuizAttemptResponse)
+@app.post(
+    "/api/v1/quiz-sessions/{attempt_id}/answers",
+    response_model=QuizAttemptResponse,
+    include_in_schema=False,
+)
+def submit_answer(
+    attempt_id: int,
+    answer: AnswerSubmission,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    attempt = db.scalar(
+        select(QuizAttempt)
+        .options(selectinload(QuizAttempt.quiz).selectinload(Quiz.questions).selectinload(QuizQuestion.question))
+        .where(QuizAttempt.id == attempt_id)
+    )
+    if attempt is None:
+        raise HTTPException(status_code=404, detail="Quiz session not found")
+    if attempt.student_id != current_user.id:
+        raise HTTPException(status_code=403, detail="You can only submit answers to your own session")
+    if attempt.status != AttemptStatus.ACTIVE:
+        raise HTTPException(status_code=409, detail="Quiz session is no longer active")
+    now = datetime.now(UTC)
+    if attempt_expired(attempt, now):
+        attempt.status = AttemptStatus.EXPIRED
+        attempt.completed_at = now
+        db.commit()
+        raise HTTPException(status_code=409, detail="Quiz time limit has expired")
+    selected = next(
+        (link.question for link in attempt.quiz.questions if link.question.id == answer.question_id),
+        None,
+    )
+    if selected is None:
+        raise HTTPException(status_code=422, detail="Question is not part of this quiz")
+    if answer.answer_index >= len(selected.options):
+        raise HTTPException(status_code=422, detail="Answer index is invalid")
+    attempt.answers = {**attempt.answers, str(answer.question_id): answer.answer_index}
+    attempt.question_timings = {
+        **attempt.question_timings,
+        str(answer.question_id): answer.time_spent_seconds,
+    }
+    db.commit()
+    db.refresh(attempt)
+    return attempt_response(attempt)
+
+
+@app.post("/quiz-sessions/{attempt_id}/complete", response_model=QuizAttemptResponse)
+@app.post(
+    "/api/v1/quiz-sessions/{attempt_id}/complete",
+    response_model=QuizAttemptResponse,
+    include_in_schema=False,
+)
+def complete_quiz(
+    attempt_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    attempt = db.scalar(
+        select(QuizAttempt)
+        .options(selectinload(QuizAttempt.quiz).selectinload(Quiz.questions).selectinload(QuizQuestion.question))
+        .where(QuizAttempt.id == attempt_id)
+    )
+    if attempt is None:
+        raise HTTPException(status_code=404, detail="Quiz session not found")
+    if attempt.student_id != current_user.id:
+        raise HTTPException(status_code=403, detail="You can only complete your own session")
+    if attempt.status != AttemptStatus.ACTIVE:
+        raise HTTPException(status_code=409, detail="Quiz session is no longer active")
+    now = datetime.now(UTC)
+    if attempt_expired(attempt, now):
+        attempt.status = AttemptStatus.EXPIRED
+        score = 0
+    else:
+        correct = sum(
+            int(str(link.question.id) in attempt.answers
+                and attempt.answers[str(link.question.id)] == link.question.correct_answer_index)
+            for link in attempt.quiz.questions
+        )
+        score = round(correct * 100 / len(attempt.quiz.questions))
+        attempt.status = AttemptStatus.COMPLETED
+    attempt.score = score
+    attempt.completed_at = now
+    db.commit()
+    db.refresh(attempt)
+    return attempt_response(attempt)
+
+
+def attempt_history_response(attempt: QuizAttempt) -> dict:
+    duration_seconds = None
+    if attempt.completed_at is not None:
+        started_at = attempt.started_at
+        completed_at = attempt.completed_at
+        if started_at.tzinfo is None:
+            started_at = started_at.replace(tzinfo=UTC)
+        if completed_at.tzinfo is None:
+            completed_at = completed_at.replace(tzinfo=UTC)
+        duration_seconds = max(0, round((completed_at - started_at).total_seconds()))
+    return {
+        "id": attempt.id,
+        "quiz_id": attempt.quiz_id,
+        "quiz_title": attempt.quiz.title,
+        "student_id": attempt.student_id,
+        "status": attempt.status,
+        "score": attempt.score,
+        "answers": attempt.answers,
+        "question_timings": attempt.question_timings,
+        "started_at": attempt.started_at,
+        "completed_at": attempt.completed_at,
+        "duration_seconds": duration_seconds,
+    }
+
+
+@app.get("/quiz-attempts/me", response_model=list[QuizAttemptHistoryResponse])
+@app.get(
+    "/api/v1/quiz-attempts/me",
+    response_model=list[QuizAttemptHistoryResponse],
+    include_in_schema=False,
+)
+def list_my_attempt_history(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    attempts = db.scalars(
+        select(QuizAttempt)
+        .options(selectinload(QuizAttempt.quiz))
+        .where(
+            QuizAttempt.student_id == current_user.id,
+            QuizAttempt.status.in_([AttemptStatus.COMPLETED, AttemptStatus.EXPIRED]),
+        )
+        .order_by(QuizAttempt.completed_at.desc(), QuizAttempt.id.desc())
+    ).all()
+    return [attempt_history_response(attempt) for attempt in attempts]
+
+
+@app.get("/users/{student_id}/quiz-attempts", response_model=list[QuizAttemptHistoryResponse])
+@app.get(
+    "/api/v1/users/{student_id}/quiz-attempts",
+    response_model=list[QuizAttemptHistoryResponse],
+    include_in_schema=False,
+)
+def list_student_attempt_history(
+    student_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if current_user.id != student_id:
+        raise HTTPException(status_code=403, detail="You can only access your own attempt history")
+    return list_my_attempt_history(current_user=current_user, db=db)
 
 
 @app.get("/auth/users/{user_id}", response_model=UserResponse)
