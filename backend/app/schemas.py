@@ -91,7 +91,28 @@ class QuizResponse(BaseModel):
     host_id: int
     created_at: datetime
     started_at: datetime | None
+    active_question_position: int | None
     questions: list[QuizQuestionResponse]
+
+
+class QuizPublicResponse(BaseModel):
+    """Quiz details safe to return without sharing the private room code."""
+
+    id: int
+    title: str
+    description: str
+    duration_minutes: int
+    max_attempts: int
+    status: QuizStatus
+    host_id: int
+    created_at: datetime
+    started_at: datetime | None
+    active_question_position: int | None
+    questions: list[QuizQuestionResponse]
+
+
+class ActivateQuizQuestionRequest(BaseModel):
+    position: int = Field(ge=0)
 
 
 class AnswerSubmission(BaseModel):
@@ -125,6 +146,18 @@ class QuizAttemptHistoryResponse(BaseModel):
     started_at: datetime
     completed_at: datetime | None
     duration_seconds: int | None
+
+
+class QuizAttemptTrendPoint(BaseModel):
+    date: str
+    average_score: float
+
+
+class QuizAttemptTrendResponse(BaseModel):
+    completed_attempts: int
+    average_score: float | None
+    best_score: int | None
+    daily_average_scores: list[QuizAttemptTrendPoint]
 
 
 class QuestionCreate(BaseModel):

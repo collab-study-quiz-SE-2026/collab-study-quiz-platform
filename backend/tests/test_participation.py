@@ -11,6 +11,12 @@ def create_quiz(client, student_token, moderator_token):
         headers={"Authorization": f"Bearer {student_token}"},
     )
     assert response.status_code == 201
+    opened = client.patch(
+        f"/quizzes/{response.json()['id']}/active-question",
+        json={"position": 0},
+        headers={"Authorization": f"Bearer {student_token}"},
+    )
+    assert opened.status_code == 200
     return response.json(), question_id
 
 
