@@ -138,7 +138,6 @@ class Quiz(Base):
     started_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
-    active_question_position: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     host: Mapped["User"] = relationship(
         "User", foreign_keys=[host_id], back_populates="quizzes"

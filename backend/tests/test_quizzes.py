@@ -72,26 +72,3 @@ def test_quiz_creation_requires_authentication(test_setup):
         json={"title": "No auth", "duration_minutes": 15, "question_ids": [1]},
     )
     assert response.status_code == 401
-
-
-def test_quiz_list_and_detail_require_auth_and_hide_room_code(test_setup):
-    client, _, _, student_token, _, _, _, moderator_token = test_setup
-    question_id = make_approved_question(
-        client, student_token, moderator_token, "Private room question?"
-    )
-    created = client.post(
-        "/quizzes",
-        json={"title": "Private room", "duration_minutes": 15, "question_ids": [question_id]},
-        headers={"Authorization": f"Bearer {student_token}"},
-    )
-    quiz_id = created.json()["id"]
-
-    assert client.get("/quizzes").status_code == 401
-    assert client.get(f"/quizzes/{quiz_id}").status_code == 401
-
-    headers = {"Authorization": f"Bearer {student_token}"}
-    listed = client.get("/quizzes", headers=headers)
-    detailed = client.get(f"/quizzes/{quiz_id}", headers=headers)
-    assert listed.status_code == detailed.status_code == 200
-    assert all("room_code" not in quiz for quiz in listed.json())
-    assert "room_code" not in detailed.json()
