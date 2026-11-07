@@ -34,8 +34,9 @@ quiz workflows.
   `PATCH /quizzes/{quiz_id}/active-question` and JSON `{"position": 0}`. The
   position is zero-based.
 - An authenticated host or student with an active attempt can connect to
-  `ws://127.0.0.1:8000/ws/quizzes/{quiz_id}?token=<JWT>`. The first message is
-  the current quiz state. The server then sends `question_changed`,
+  `ws://127.0.0.1:8000/ws/quizzes/{quiz_id}` and send
+  `{"type": "authenticate", "token": "<JWT>"}` as the first message. The
+  server then sends the current quiz state, followed by `question_changed`,
   `answer_submitted`, and `attempt_completed` events as those actions happen.
 - Student attempt history is available at `GET /quiz-attempts/me`; summary and
   daily average scores are at `GET /quiz-attempts/me/trends`. Both require a

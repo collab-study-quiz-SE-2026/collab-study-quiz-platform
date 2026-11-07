@@ -29,6 +29,16 @@ def test_student_can_retrieve_completed_attempt_history(test_setup):
     assert response.json()[0]["question_timings"] == {str(question_id): 11}
     assert response.json()[0]["completed_at"] is not None
 
+    trends = client.get(
+        "/quiz-attempts/me/trends",
+        headers={"Authorization": f"Bearer {student_token}"},
+    )
+    assert trends.status_code == 200
+    assert trends.json()["completed_attempts"] == 1
+    assert trends.json()["average_score"] == 100
+    assert trends.json()["best_score"] == 100
+    assert len(trends.json()["daily_average_scores"]) == 1
+
 
 def test_attempt_history_is_private_to_the_authenticated_student(test_setup):
     client, _, _, student_token, other_student, other_token, _, moderator_token = test_setup

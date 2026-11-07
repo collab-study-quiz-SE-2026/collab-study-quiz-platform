@@ -1,3 +1,4 @@
+import asyncio
 from datetime import UTC, datetime, timedelta
 import os
 from contextlib import closing
@@ -6,6 +7,7 @@ import psycopg
 import jwt
 from botocore.exceptions import BotoCoreError, ClientError
 from fastapi import Depends, FastAPI, HTTPException, WebSocket, WebSocketDisconnect, status
+from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session, selectinload
@@ -97,7 +99,7 @@ async def broadcast_quiz_event(quiz_id: int, event: dict) -> None:
     connections = quiz_connections.get(quiz_id, set()).copy()
     for connection in connections:
         try:
-            await connection.send_json(event)
+            await connection.send_json(jsonable_encoder(event))
         except (RuntimeError, WebSocketDisconnect):
             quiz_connections.get(quiz_id, set()).discard(connection)
 
@@ -1037,7 +1039,6 @@ async def websocket_health(websocket: WebSocket):
 async def quiz_updates(
     websocket: WebSocket,
     quiz_id: int,
-    token: str | None = None,
     db: Session = Depends(get_db),
 ):
     """Stream a quiz's active question and answer/completion updates."""
@@ -1046,8 +1047,19 @@ async def quiz_updates(
         await websocket.close(code=1008)
         return
 
+    await websocket.accept()
+    try:
+        authentication = await asyncio.wait_for(websocket.receive_json(), timeout=5)
+    except (TimeoutError, WebSocketDisconnect, ValueError):
+        await websocket.close(code=1008)
+        return
+    if not isinstance(authentication, dict) or authentication.get("type") != "authenticate":
+        await websocket.close(code=1008)
+        return
+
+    token = authentication.get("token")
     secret = os.getenv("JWT_SECRET_KEY")
-    if not token or not secret:
+    if not isinstance(token, str) or not secret:
         await websocket.close(code=1008)
         return
 
@@ -1076,9 +1088,8 @@ async def quiz_updates(
         await websocket.close(code=1008)
         return
 
-    await websocket.accept()
     quiz_connections.setdefault(quiz_id, set()).add(websocket)
-    await websocket.send_json({"event": "state", **public_quiz_response(quiz)})
+    await websocket.send_json(jsonable_encoder({"event": "state", **public_quiz_response(quiz)}))
     try:
         while True:
             message = await websocket.receive_text()
