@@ -195,3 +195,17 @@ class CategorySummaryResponse(BaseModel):
     subjects: list[str]
     topics: list[str]
     difficulties: list[str]
+
+class StudyMaterialResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    title: str
+    course_code: str
+    tags: list[str]
+    original_filename: str
+    file_type: str
+    mime_type: str
+    file_size: int
+    uploader_id: int
+    created_at: datetime
