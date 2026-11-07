@@ -12,7 +12,7 @@ collaborating on questions, playing quizzes, and tracking learning progress.
 ## Current foundation
 
 - React + Vite + TypeScript frontend with a backend connection indicator.
-- FastAPI REST health checks and authenticated quiz-room WebSocket updates.
+- FastAPI REST health checks and a small WebSocket ping/pong connection.
 - PostgreSQL 15 with persistent data, SQLAlchemy 2 sessions, Alembic migrations,
   and a small users table for authentication.
 - Student registration, Bcrypt password hashing, 60-minute signed JWT login,
@@ -21,30 +21,8 @@ collaborating on questions, playing quizzes, and tracking learning progress.
 - Caddy serving the built frontend, HTTPS API routes, and WSS with TLS 1.3.
 - Environment-based credentials, ignored local secrets, and parameterized SQL.
 
-Quiz creation, participation, answer evaluation, and private attempt history are
-implemented as backend API foundations. The storage foundation does not yet
-implement study-material uploads, and the frontend still needs to integrate the
-quiz workflows.
-
-## Quiz API notes
-
-- Creating a quiz requires a JWT. The response includes the room code for the
-  host. Authenticated quiz list/detail responses omit that code.
-- The host opens the active question with
-  `PATCH /quizzes/{quiz_id}/active-question` and JSON `{"position": 0}`. The
-  position is zero-based.
-- An authenticated host or student with an active attempt can connect to
-  `ws://127.0.0.1:8000/ws/quizzes/{quiz_id}` and send
-  `{"type": "authenticate", "token": "<JWT>"}` as the first message. The
-  server then sends the current quiz state, followed by `question_changed`,
-  `answer_submitted`, and `attempt_completed` events as those actions happen.
-- Student attempt history is available at `GET /quiz-attempts/me`; summary and
-  daily average scores are at `GET /quiz-attempts/me/trends`. Both require a
-  JWT and only return the signed-in student's data.
-
-The WebSocket event broadcaster is in memory for this student project, so it
-coordinates clients connected to the same backend process. Database records
-remain the source for quiz and attempt state.
+Materials, quizzes, analytics, and their application tables belong to their own
+feature issues. The storage foundation does not implement uploads.
 
 ## Local addresses
 
