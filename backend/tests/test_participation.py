@@ -11,6 +11,12 @@ def create_quiz(client, student_token, moderator_token):
         headers={"Authorization": f"Bearer {student_token}"},
     )
     assert response.status_code == 201
+    opened = client.patch(
+        f"/quizzes/{response.json()['id']}/active-question",
+        json={"position": 0},
+        headers={"Authorization": f"Bearer {student_token}"},
+    )
+    assert opened.status_code == 200
     return response.json(), question_id
 
 
@@ -39,6 +45,39 @@ def test_student_joins_by_room_submits_answer_and_is_scored(test_setup):
     assert completed.status_code == 200
     assert completed.json()["status"] == "completed"
     assert completed.json()["score"] == 100
+
+
+def test_host_can_sync_active_question_over_authenticated_websocket(test_setup):
+    client, _, _, student_token, _, _, _, moderator_token = test_setup
+    quiz, _ = create_quiz(client, student_token, moderator_token)
+
+    with client.websocket_connect(f"/ws/quizzes/{quiz['id']}") as websocket:
+        websocket.send_json({"type": "authenticate", "token": student_token})
+        state = websocket.receive_json()
+        assert state["event"] == "state"
+        assert state["active_question_position"] == 0
+        assert "room_code" not in state
+
+        changed = client.patch(
+            f"/quizzes/{quiz['id']}/active-question",
+            json={"position": 0},
+            headers={"Authorization": f"Bearer {student_token}"},
+        )
+        assert changed.status_code == 200
+        event = websocket.receive_json()
+        assert event["event"] == "question_changed"
+        assert event["active_question_position"] == 0
+
+
+def test_only_quiz_host_can_select_active_question(test_setup):
+    client, _, _, student_token, _, other_token, _, moderator_token = test_setup
+    quiz, _ = create_quiz(client, student_token, moderator_token)
+    response = client.patch(
+        f"/quizzes/{quiz['id']}/active-question",
+        json={"position": 0},
+        headers={"Authorization": f"Bearer {other_token}"},
+    )
+    assert response.status_code == 403
 
 
 def test_students_cannot_submit_to_another_students_session(test_setup):

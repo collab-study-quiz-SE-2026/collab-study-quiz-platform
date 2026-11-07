@@ -1,15 +1,18 @@
+import asyncio
 from datetime import UTC, datetime, timedelta
 import os
 from contextlib import closing
 
 import psycopg
+import jwt
 from botocore.exceptions import BotoCoreError, ClientError
 from fastapi import Depends, FastAPI, HTTPException, WebSocket, WebSocketDisconnect, status
+from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session, selectinload
 
-from app.auth import create_access_token, get_current_user, hash_password, verify_password
+from app.auth import JWT_ALGORITHM, create_access_token, get_current_user, hash_password, verify_password
 from app.database import get_db
 from app.models import (
     AttemptStatus,
@@ -31,9 +34,12 @@ from app.schemas import (
     QuestionResponse,
     QuestionUpdate,
     AnswerSubmission,
+    ActivateQuizQuestionRequest,
     QuizCreate,
     QuizAttemptResponse,
     QuizAttemptHistoryResponse,
+    QuizAttemptTrendResponse,
+    QuizPublicResponse,
     QuizResponse,
     RegistrationRequest,
     RegistrationResponse,
@@ -53,6 +59,8 @@ app.add_middleware(
     allow_headers=["Authorization", "Content-Type"],
 )
 
+quiz_connections: dict[int, set[WebSocket]] = {}
+
 
 def quiz_response(quiz: Quiz) -> dict:
     return {
@@ -66,6 +74,7 @@ def quiz_response(quiz: Quiz) -> dict:
         "host_id": quiz.host_id,
         "created_at": quiz.created_at,
         "started_at": quiz.started_at,
+        "active_question_position": quiz.active_question_position,
         "questions": [
             {
                 "id": link.question.id,
@@ -78,6 +87,21 @@ def quiz_response(quiz: Quiz) -> dict:
             for link in quiz.questions
         ],
     }
+
+
+def public_quiz_response(quiz: Quiz) -> dict:
+    response = quiz_response(quiz)
+    response.pop("room_code")
+    return response
+
+
+async def broadcast_quiz_event(quiz_id: int, event: dict) -> None:
+    connections = quiz_connections.get(quiz_id, set()).copy()
+    for connection in connections:
+        try:
+            await connection.send_json(jsonable_encoder(event))
+        except (RuntimeError, WebSocketDisconnect):
+            quiz_connections.get(quiz_id, set()).discard(connection)
 
 
 def generate_room_code(db: Session) -> str:
@@ -259,6 +283,7 @@ def create_quiz(
         room_code=generate_room_code(db),
         status=QuizStatus.PUBLISHED,
         host_id=current_user.id,
+        active_question_position=None,
     )
     quiz.questions = [
         QuizQuestion(question=questions_by_id[question_id], position=position)
@@ -270,13 +295,17 @@ def create_quiz(
     return quiz_response(quiz)
 
 
-@app.get("/quizzes/{quiz_id}", response_model=QuizResponse)
+@app.get("/quizzes/{quiz_id}", response_model=QuizPublicResponse)
 @app.get(
     "/api/v1/quizzes/{quiz_id}",
-    response_model=QuizResponse,
+    response_model=QuizPublicResponse,
     include_in_schema=False,
 )
-def read_quiz(quiz_id: int, db: Session = Depends(get_db)):
+def read_quiz(
+    quiz_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
     quiz = db.scalar(
         select(Quiz)
         .options(selectinload(Quiz.questions).selectinload(QuizQuestion.question))
@@ -284,19 +313,22 @@ def read_quiz(quiz_id: int, db: Session = Depends(get_db)):
     )
     if quiz is None or quiz.status == QuizStatus.DRAFT:
         raise HTTPException(status_code=404, detail="Quiz not found")
-    return quiz_response(quiz)
+    return public_quiz_response(quiz)
 
 
-@app.get("/quizzes", response_model=list[QuizResponse])
-@app.get("/api/v1/quizzes", response_model=list[QuizResponse], include_in_schema=False)
-def list_quizzes(db: Session = Depends(get_db)):
+@app.get("/quizzes", response_model=list[QuizPublicResponse])
+@app.get("/api/v1/quizzes", response_model=list[QuizPublicResponse], include_in_schema=False)
+def list_quizzes(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
     quizzes = db.scalars(
         select(Quiz)
         .options(selectinload(Quiz.questions).selectinload(QuizQuestion.question))
         .where(Quiz.status.in_([QuizStatus.PUBLISHED, QuizStatus.LIVE]))
         .order_by(Quiz.created_at.desc(), Quiz.id.desc())
     ).all()
-    return [quiz_response(quiz) for quiz in quizzes]
+    return [public_quiz_response(quiz) for quiz in quizzes]
 
 
 def start_attempt(
@@ -305,23 +337,65 @@ def start_attempt(
     db: Session,
 ) -> dict:
     now = datetime.now(UTC)
+    # Lock the quiz row while checking attempts so parallel join requests
+    # cannot both pass the maximum-attempt check.
+    quiz = db.scalar(select(Quiz).where(Quiz.id == quiz.id).with_for_update())
+    if quiz is None:
+        raise HTTPException(status_code=404, detail="Quiz not found")
     if quiz.status not in (QuizStatus.PUBLISHED, QuizStatus.LIVE):
         raise HTTPException(status_code=409, detail="Quiz is not available")
     existing = active_attempt(db, quiz.id, current_user.id)
     if existing is not None:
-        return attempt_response(existing)
+        if not attempt_expired(existing, now):
+            return attempt_response(existing)
+        existing.status = AttemptStatus.EXPIRED
+        existing.score = 0
+        existing.completed_at = now
+        db.flush()
     count = db.query(QuizAttempt).filter(
         QuizAttempt.quiz_id == quiz.id,
         QuizAttempt.student_id == current_user.id,
         QuizAttempt.status.in_([AttemptStatus.COMPLETED, AttemptStatus.EXPIRED]),
     ).count()
     if count >= quiz.max_attempts:
+        db.commit()
         raise HTTPException(status_code=409, detail="Maximum quiz attempts reached")
     attempt = QuizAttempt(quiz=quiz, student=current_user, started_at=now)
     db.add(attempt)
     db.commit()
     db.refresh(attempt)
     return attempt_response(attempt)
+
+
+@app.patch("/quizzes/{quiz_id}/active-question", response_model=QuizPublicResponse)
+@app.patch(
+    "/api/v1/quizzes/{quiz_id}/active-question",
+    response_model=QuizPublicResponse,
+    include_in_schema=False,
+)
+async def set_active_question(
+    quiz_id: int,
+    selection: ActivateQuizQuestionRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    quiz = load_quiz(db, quiz_id)
+    if quiz is None:
+        raise HTTPException(status_code=404, detail="Quiz not found")
+    if quiz.host_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Only the quiz host can change the active question")
+    if selection.position >= len(quiz.questions):
+        raise HTTPException(status_code=422, detail="Question position is invalid")
+
+    quiz.active_question_position = selection.position
+    if quiz.status == QuizStatus.PUBLISHED:
+        quiz.status = QuizStatus.LIVE
+        quiz.started_at = datetime.now(UTC)
+    db.commit()
+    db.refresh(quiz)
+    state = public_quiz_response(quiz)
+    await broadcast_quiz_event(quiz.id, {"event": "question_changed", **state})
+    return state
 
 
 @app.post("/quizzes/{quiz_id}/sessions", response_model=QuizAttemptResponse)
@@ -365,7 +439,7 @@ def join_quiz_by_room(
     response_model=QuizAttemptResponse,
     include_in_schema=False,
 )
-def submit_answer(
+async def submit_answer(
     attempt_id: int,
     answer: AnswerSubmission,
     current_user: User = Depends(get_current_user),
@@ -385,6 +459,7 @@ def submit_answer(
     now = datetime.now(UTC)
     if attempt_expired(attempt, now):
         attempt.status = AttemptStatus.EXPIRED
+        attempt.score = 0
         attempt.completed_at = now
         db.commit()
         raise HTTPException(status_code=409, detail="Quiz time limit has expired")
@@ -394,6 +469,11 @@ def submit_answer(
     )
     if selected is None:
         raise HTTPException(status_code=422, detail="Question is not part of this quiz")
+    if attempt.quiz.active_question_position is None:
+        raise HTTPException(status_code=409, detail="The host has not opened a question yet")
+    active_question = attempt.quiz.questions[attempt.quiz.active_question_position].question
+    if selected.id != active_question.id:
+        raise HTTPException(status_code=409, detail="This question is not currently active")
     if answer.answer_index >= len(selected.options):
         raise HTTPException(status_code=422, detail="Answer index is invalid")
     attempt.answers = {**attempt.answers, str(answer.question_id): answer.answer_index}
@@ -403,6 +483,15 @@ def submit_answer(
     }
     db.commit()
     db.refresh(attempt)
+    await broadcast_quiz_event(
+        attempt.quiz_id,
+        {
+            "event": "answer_submitted",
+            "attempt_id": attempt.id,
+            "question_id": answer.question_id,
+            "answered_question_ids": [int(question_id) for question_id in attempt.answers],
+        },
+    )
     return attempt_response(attempt)
 
 
@@ -412,7 +501,7 @@ def submit_answer(
     response_model=QuizAttemptResponse,
     include_in_schema=False,
 )
-def complete_quiz(
+async def complete_quiz(
     attempt_id: int,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -444,6 +533,10 @@ def complete_quiz(
     attempt.completed_at = now
     db.commit()
     db.refresh(attempt)
+    await broadcast_quiz_event(
+        attempt.quiz_id,
+        {"event": "attempt_completed", "attempt_id": attempt.id, "status": attempt.status},
+    )
     return attempt_response(attempt)
 
 
@@ -492,6 +585,46 @@ def list_my_attempt_history(
         .order_by(QuizAttempt.completed_at.desc(), QuizAttempt.id.desc())
     ).all()
     return [attempt_history_response(attempt) for attempt in attempts]
+
+
+@app.get("/quiz-attempts/me/trends", response_model=QuizAttemptTrendResponse)
+@app.get(
+    "/api/v1/quiz-attempts/me/trends",
+    response_model=QuizAttemptTrendResponse,
+    include_in_schema=False,
+)
+def my_attempt_trends(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    attempts = db.scalars(
+        select(QuizAttempt)
+        .where(
+            QuizAttempt.student_id == current_user.id,
+            QuizAttempt.status == AttemptStatus.COMPLETED,
+            QuizAttempt.score.is_not(None),
+        )
+        .order_by(QuizAttempt.completed_at, QuizAttempt.id)
+    ).all()
+    daily_scores: dict[str, list[int]] = {}
+    for attempt in attempts:
+        if attempt.completed_at is not None and attempt.score is not None:
+            day = attempt.completed_at.date().isoformat()
+            daily_scores.setdefault(day, []).append(attempt.score)
+
+    return {
+        "completed_attempts": len(attempts),
+        "average_score": (
+            round(sum(attempt.score for attempt in attempts if attempt.score is not None) / len(attempts), 2)
+            if attempts
+            else None
+        ),
+        "best_score": max((attempt.score for attempt in attempts if attempt.score is not None), default=None),
+        "daily_average_scores": [
+            {"date": day, "average_score": round(sum(scores) / len(scores), 2)}
+            for day, scores in sorted(daily_scores.items())
+        ],
+    }
 
 
 @app.get("/users/{student_id}/quiz-attempts", response_model=list[QuizAttemptHistoryResponse])
@@ -900,3 +1033,71 @@ async def websocket_health(websocket: WebSocket):
             await websocket.send_text("pong" if message == "ping" else "Send ping")
     except WebSocketDisconnect:
         pass
+
+
+@app.websocket("/ws/quizzes/{quiz_id}")
+async def quiz_updates(
+    websocket: WebSocket,
+    quiz_id: int,
+    db: Session = Depends(get_db),
+):
+    """Stream a quiz's active question and answer/completion updates."""
+    origin = websocket.headers.get("origin")
+    if origin is not None and origin not in frontend_origins:
+        await websocket.close(code=1008)
+        return
+
+    await websocket.accept()
+    try:
+        authentication = await asyncio.wait_for(websocket.receive_json(), timeout=5)
+    except (TimeoutError, WebSocketDisconnect, ValueError):
+        await websocket.close(code=1008)
+        return
+    if not isinstance(authentication, dict) or authentication.get("type") != "authenticate":
+        await websocket.close(code=1008)
+        return
+
+    token = authentication.get("token")
+    secret = os.getenv("JWT_SECRET_KEY")
+    if not isinstance(token, str) or not secret:
+        await websocket.close(code=1008)
+        return
+
+    try:
+        payload = jwt.decode(token, secret, algorithms=[JWT_ALGORITHM])
+        user_id = int(payload["sub"])
+        token_version = int(payload["token_version"])
+    except (jwt.InvalidTokenError, KeyError, TypeError, ValueError):
+        await websocket.close(code=1008)
+        return
+
+    user = db.get(User, user_id)
+    quiz = load_quiz(db, quiz_id)
+    if user is None or user.token_version != token_version or quiz is None:
+        await websocket.close(code=1008)
+        return
+
+    has_active_attempt = db.scalar(
+        select(QuizAttempt.id).where(
+            QuizAttempt.quiz_id == quiz_id,
+            QuizAttempt.student_id == user.id,
+            QuizAttempt.status == AttemptStatus.ACTIVE,
+        )
+    ) is not None
+    if quiz.host_id != user.id and not has_active_attempt:
+        await websocket.close(code=1008)
+        return
+
+    quiz_connections.setdefault(quiz_id, set()).add(websocket)
+    await websocket.send_json(jsonable_encoder({"event": "state", **public_quiz_response(quiz)}))
+    try:
+        while True:
+            message = await websocket.receive_text()
+            if message == "ping":
+                await websocket.send_text("pong")
+    except WebSocketDisconnect:
+        pass
+    finally:
+        quiz_connections.get(quiz_id, set()).discard(websocket)
+        if not quiz_connections.get(quiz_id):
+            quiz_connections.pop(quiz_id, None)
