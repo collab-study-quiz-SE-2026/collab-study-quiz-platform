@@ -1,5 +1,7 @@
 from contextlib import closing
+from io import BytesIO
 
+from botocore.exceptions import ClientError
 from app.storage import get_storage_client
 import os
 from collections.abc import Generator
@@ -349,3 +351,169 @@ def test_upload_real_storage_round_trip(material_client, monkeypatch):
             )
     finally:
         session.close()
+
+
+
+def upload_test_material(
+    client,
+    token,
+    title="Test Notes",
+    filename="notes.md",
+    content=b"# Test Notes",
+    content_type="text/markdown",
+):
+    return client.post(
+        "/materials/upload",
+        headers=auth_headers(token),
+        data={
+            "title": title,
+            "course_code": "TEST101",
+            "tags": "testing, notes",
+        },
+        files={"file": (filename, content, content_type)},
+    )
+
+
+def test_list_materials_requires_authentication(material_client):
+    response = material_client.get("/materials")
+
+    assert response.status_code == 401
+
+
+def test_download_material_requires_authentication(material_client):
+    response = material_client.get("/materials/1/download")
+
+    assert response.status_code == 401
+
+
+def test_list_materials_success(material_client, mock_storage):
+    token = register_and_login(material_client)
+
+    first = upload_test_material(
+        material_client, token, title="DBMS Notes"
+    )
+    second = upload_test_material(
+        material_client, token, title="Python Notes"
+    )
+
+    assert first.status_code == 201
+    assert second.status_code == 201
+
+    response = material_client.get(
+        "/materials",
+        headers=auth_headers(token),
+    )
+
+    assert response.status_code == 200
+
+    materials = response.json()
+    assert len(materials) >= 2
+
+    titles = [material["title"] for material in materials]
+    assert "DBMS Notes" in titles
+    assert "Python Notes" in titles
+
+    for material in materials:
+        assert "storage_key" not in material
+        assert "title" in material
+        assert "course_code" in material
+        assert "tags" in material
+
+
+def test_download_material_success(material_client, mock_storage):
+    token = register_and_login(material_client)
+    content = b"# Downloadable Study Notes"
+
+    upload = upload_test_material(
+        material_client,
+        token,
+        filename="download-notes.md",
+        content=content,
+    )
+
+    assert upload.status_code == 201
+    material_id = upload.json()["id"]
+
+    mock_storage.get_object.return_value = {
+        "Body": BytesIO(content)
+    }
+
+    response = material_client.get(
+        f"/materials/{material_id}/download",
+        headers=auth_headers(token),
+    )
+
+    assert response.status_code == 200
+    assert response.content == content
+    assert response.headers["content-type"].startswith("text/markdown")
+    assert "attachment" in response.headers["content-disposition"]
+    mock_storage.get_object.assert_called_once()
+
+
+def test_download_material_not_found(material_client, mock_storage):
+    token = register_and_login(material_client)
+
+    response = material_client.get(
+        "/materials/999999/download",
+        headers=auth_headers(token),
+    )
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Study material not found"
+    mock_storage.get_object.assert_not_called()
+
+
+def test_download_missing_storage_file(material_client, mock_storage):
+    token = register_and_login(material_client)
+
+    upload = upload_test_material(material_client, token)
+    assert upload.status_code == 201
+
+    mock_storage.get_object.side_effect = ClientError(
+        {
+            "Error": {
+                "Code": "NoSuchKey",
+                "Message": "The requested object does not exist",
+            }
+        },
+        "GetObject",
+    )
+
+    material_id = upload.json()["id"]
+
+    response = material_client.get(
+        f"/materials/{material_id}/download",
+        headers=auth_headers(token),
+    )
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == (
+        "Study material file not found in storage"
+    )
+
+
+def test_download_storage_unavailable(material_client, mock_storage):
+    token = register_and_login(material_client)
+
+    upload = upload_test_material(material_client, token)
+    assert upload.status_code == 201
+
+    mock_storage.get_object.side_effect = ClientError(
+        {
+            "Error": {
+                "Code": "InternalError",
+                "Message": "Storage unavailable",
+            }
+        },
+        "GetObject",
+    )
+
+    material_id = upload.json()["id"]
+
+    response = material_client.get(
+        f"/materials/{material_id}/download",
+        headers=auth_headers(token),
+    )
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Storage service is unavailable"

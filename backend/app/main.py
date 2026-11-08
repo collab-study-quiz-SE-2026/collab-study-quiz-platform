@@ -3,6 +3,7 @@ import os
 from contextlib import closing
 from pathlib import Path
 from uuid import uuid4
+from urllib.parse import quote
 
 import psycopg
 from botocore.exceptions import BotoCoreError, ClientError
@@ -12,6 +13,7 @@ from fastapi import (
     File,
     Form,
     HTTPException,
+    Response,
     UploadFile,
     WebSocket,
     WebSocketDisconnect,
@@ -661,3 +663,75 @@ def upload_study_material(
 
     finally:
         file.file.close()
+
+@app.get("/materials", response_model=list[StudyMaterialResponse])
+def list_study_materials(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    materials = db.scalars(
+        select(StudyMaterial).order_by(StudyMaterial.created_at.desc())
+    ).all()
+
+    return materials
+
+@app.get("/materials/{material_id}/download")
+def download_study_material(
+    material_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    material = db.get(StudyMaterial, material_id)
+
+    if material is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Study material not found",
+        )
+
+    try:
+        with closing(get_storage_client()) as storage:
+            stored_object = storage.get_object(
+                Bucket=os.environ["S3_BUCKET"],
+                Key=material.storage_key,
+            )
+            file_content = stored_object["Body"].read()
+            stored_object["Body"].close()
+
+    except ClientError as exc:
+        error_code = exc.response.get("Error", {}).get("Code", "")
+
+        if error_code in ("NoSuchKey", "404", "NotFound"):
+            raise HTTPException(
+                status_code=404,
+                detail="Study material file not found in storage",
+            ) from None
+
+        raise HTTPException(
+            status_code=503,
+            detail="Storage service is unavailable",
+        ) from None
+
+    except BotoCoreError:
+        raise HTTPException(
+            status_code=503,
+            detail="Storage service is unavailable",
+        ) from None
+
+    except Exception:
+        raise HTTPException(
+            status_code=503,
+            detail="Unable to retrieve study material",
+        ) from None
+
+    filename = quote(Path(material.original_filename).name)
+
+    return Response(
+        content=file_content,
+        media_type=material.mime_type,
+        headers={
+            "Content-Disposition": f"attachment; filename*=UTF-8''{filename}",
+            "Content-Length": str(len(file_content)),
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
