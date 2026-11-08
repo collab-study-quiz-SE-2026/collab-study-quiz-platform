@@ -1,152 +1,338 @@
 import { FormEvent, useEffect, useState } from "react";
+import { Account, ConnectionStatus } from "./types";
+import {
+  checkBackendHealth,
+  getMe,
+  loginUser,
+  logoutUser,
+  registerUser,
+  setAuthToken,
+  getAuthToken,
+} from "./api";
+import QuestionBank from "./components/QuestionBank";
+import Quizzes from "./components/Quizzes";
+import StudyMaterials from "./components/StudyMaterials";
+import AttemptHistory from "./components/AttemptHistory";
+import ModeratorQueue from "./components/ModeratorQueue";
 
-const defaultApiUrl = window.location.protocol === "https:" ? "/api" : "http://127.0.0.1:8000";
-const apiUrl = (import.meta.env.VITE_API_URL || defaultApiUrl).replace(/\/$/, "");
-
-type Connection = "checking" | "connected" | "unavailable";
+type MainNavTab = "questions" | "quizzes" | "materials" | "history" | "moderation";
 type AuthMode = "login" | "register";
-type Account = { id: number; email: string; role: string };
-
-async function responseMessage(response: Response) {
-  const body = await response.json().catch(() => ({}));
-  return body.detail || body.message || "Something went wrong. Please try again.";
-}
 
 export default function App() {
-  const [connection, setConnection] = useState<Connection>("checking");
-  const [mode, setMode] = useState<AuthMode>("register");
+  const [connection, setConnection] = useState<ConnectionStatus>("checking");
+  const [account, setAccount] = useState<Account | null>(null);
+  const [navTab, setNavTab] = useState<MainNavTab>("questions");
+
+  // Auth form state
+  const [authMode, setAuthMode] = useState<AuthMode>("login");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [account, setAccount] = useState<Account | null>(null);
-  const [token, setToken] = useState("");
-  const [message, setMessage] = useState("");
-  const [submitting, setSubmitting] = useState(false);
+  const [authMessage, setAuthMessage] = useState<{ text: string; type: "success" | "error" } | null>(null);
+  const [submittingAuth, setSubmittingAuth] = useState(false);
 
   async function checkConnection() {
     setConnection("checking");
-    try {
-      const response = await fetch(`${apiUrl}/health`, { signal: AbortSignal.timeout(5000) });
-      if (!response.ok || (await response.json()).status !== "ok") throw new Error();
-      setConnection("connected");
-    } catch {
-      setConnection("unavailable");
-    }
+    const ok = await checkBackendHealth();
+    setConnection(ok ? "connected" : "unavailable");
   }
 
-  async function loadAccount(accessToken: string) {
-    const response = await fetch(`${apiUrl}/auth/me`, {
-      headers: { Authorization: `Bearer ${accessToken}` },
-    });
-    if (!response.ok) {
-      sessionStorage.removeItem("csmqp_access_token");
-      setToken("");
+  async function loadCurrentAccount() {
+    const token = getAuthToken();
+    if (!token) {
       setAccount(null);
       return;
     }
-    setAccount(await response.json());
+    try {
+      const me = await getMe();
+      setAccount(me);
+    } catch {
+      logoutUser();
+      setAccount(null);
+    }
   }
 
   useEffect(() => {
     void checkConnection();
-    const savedToken = sessionStorage.getItem("csmqp_access_token");
-    if (savedToken) {
-      setToken(savedToken);
-      void loadAccount(savedToken);
-    }
+    void loadCurrentAccount();
   }, []);
 
-  async function submit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    setSubmitting(true);
-    setMessage("");
+  async function handleAuthSubmit(e: FormEvent) {
+    e.preventDefault();
+    setSubmittingAuth(true);
+    setAuthMessage(null);
     try {
-      const response = await fetch(`${apiUrl}/auth/${mode}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email, password }),
-      });
-      if (!response.ok) {
-        setMessage(await responseMessage(response));
-        return;
-      }
-      if (mode === "register") {
-        setMessage("Registration successful. You can now log in.");
-        setMode("login");
+      if (authMode === "register") {
+        await registerUser(email, password);
+        setAuthMessage({
+          text: "Registration successful! You can now log in.",
+          type: "success",
+        });
+        setAuthMode("login");
+      } else {
+        const res = await loginUser(email, password);
+        setAuthToken(res.access_token);
         setPassword("");
-        return;
+        await loadCurrentAccount();
+        setAuthMessage({ text: "Logged in successfully!", type: "success" });
       }
-
-      const result = await response.json();
-      sessionStorage.setItem("csmqp_access_token", result.access_token);
-      setToken(result.access_token);
-      setPassword("");
-      await loadAccount(result.access_token);
-      setMessage("Logged in successfully.");
-    } catch {
-      setMessage("The backend could not be reached. Check the connection and try again.");
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Authentication failed";
+      setAuthMessage({ text: msg, type: "error" });
     } finally {
-      setSubmitting(false);
+      setSubmittingAuth(false);
     }
   }
 
-  async function logout() {
-    const response = await fetch(`${apiUrl}/auth/logout`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${token}` },
-    }).catch(() => null);
-    if (!response?.ok) {
-      setMessage("Logout could not be confirmed. Keep this tab open and try again.");
-      return;
-    }
-    sessionStorage.removeItem("csmqp_access_token");
-    setToken("");
+  async function handleLogout() {
+    await logoutUser();
     setAccount(null);
-    setMessage("Logged out successfully.");
+    setNavTab("questions");
+    setAuthMessage({ text: "Logged out successfully.", type: "success" });
+  }
+
+  // Quick 1-Click Demo Logins
+  async function quickLogin(demoEmail: string, demoPass: string) {
+    setSubmittingAuth(true);
+    setAuthMessage(null);
+    try {
+      const res = await loginUser(demoEmail, demoPass);
+      setAuthToken(res.access_token);
+      await loadCurrentAccount();
+      setAuthMessage({ text: `Logged in as ${demoEmail}`, type: "success" });
+    } catch {
+      // If user not found, register first
+      try {
+        await registerUser(demoEmail, demoPass);
+        const res = await loginUser(demoEmail, demoPass);
+        setAuthToken(res.access_token);
+        await loadCurrentAccount();
+        setAuthMessage({ text: `Created and logged in as ${demoEmail}`, type: "success" });
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : "Quick login failed";
+        setAuthMessage({ text: msg, type: "error" });
+      }
+    } finally {
+      setSubmittingAuth(false);
+    }
   }
 
   return (
-    <main>
-      <p className="eyebrow">SOFTWARE ENGINEERING PROJECT</p>
-      <h1>CSMQP</h1>
-      <p className="intro">Collaborative Study Material &amp; Quiz Platform</p>
+    <div className="app-layout">
+      {/* ================= TOP NAVBAR ================= */}
+      <header className="navbar">
+        <div className="nav-brand">
+          <span className="brand-badge">CSMQP</span>
+          <span className="brand-title">Collaborative Study &amp; Quiz Platform</span>
+        </div>
 
-      <section aria-labelledby="connection-title">
-        <h2 id="connection-title">Development connection check</h2>
-        <p className={`status ${connection}`} role="status" aria-live="polite">
-          <span className="dot" aria-hidden="true" />
-          {connection === "checking" && "Checking backend…"}
-          {connection === "connected" && "Backend connected"}
-          {connection === "unavailable" && "Backend unavailable"}
-        </p>
-        <p>{connection === "unavailable" ? "Start FastAPI and check your API URL, then try again." : "This page checks that the frontend can reach FastAPI."}</p>
-        <p className="api-url">API: <code>{apiUrl}</code></p>
-        <button onClick={() => void checkConnection()} disabled={connection === "checking"}>Check connection</button>
-      </section>
+        <div className="nav-right">
+          {/* Health indicator */}
+          <button
+            type="button"
+            className={`status-pill status-${connection}`}
+            onClick={() => void checkConnection()}
+            title="Click to re-check backend connection"
+          >
+            <span className="dot" aria-hidden="true" />
+            {connection === "connected" && "Backend Connected"}
+            {connection === "checking" && "Connecting…"}
+            {connection === "unavailable" && "Backend Offline"}
+          </button>
 
-      <section aria-labelledby="account-title">
-        <h2 id="account-title">Account</h2>
-        {account ? (
-          <div>
-            <p>You are logged in as <strong>{account.email}</strong> ({account.role}).</p>
-            <button onClick={() => void logout()}>Log out</button>
+          {/* Account information */}
+          {account ? (
+            <div className="user-profile-widget">
+              <span className="user-email">{account.email}</span>
+              <span className={`role-badge role-${account.role}`}>{account.role}</span>
+              <button
+                type="button"
+                className="small-btn secondary"
+                onClick={handleLogout}
+              >
+                Log Out
+              </button>
+            </div>
+          ) : (
+            <span className="auth-hint">Please sign in below</span>
+          )}
+        </div>
+      </header>
+
+      {/* ================= MAIN CONTENT ================= */}
+      <main className="content-container">
+        {!account ? (
+          /* ================= LOGIN / REGISTER VIEW ================= */
+          <div className="auth-landing-card">
+            <div className="auth-header">
+              <h1>Welcome to CSMQP</h1>
+              <p className="intro">
+                A collaborative academic platform for students to share study materials, contribute question banks, and participate in quizzes.
+              </p>
+            </div>
+
+            {authMessage && (
+              <div className={`banner-alert ${authMessage.type === "success" ? "banner-success" : "banner-error"}`}>
+                {authMessage.text}
+              </div>
+            )}
+
+            <div className="auth-form-wrapper">
+              <div className="mode-buttons" aria-label="Account action">
+                <button
+                  type="button"
+                  className={authMode === "login" ? "selected" : "secondary"}
+                  onClick={() => { setAuthMode("login"); setAuthMessage(null); }}
+                >
+                  Log In
+                </button>
+                <button
+                  type="button"
+                  className={authMode === "register" ? "selected" : "secondary"}
+                  onClick={() => { setAuthMode("register"); setAuthMessage(null); }}
+                >
+                  Create Account
+                </button>
+              </div>
+
+              <form onSubmit={handleAuthSubmit}>
+                <label htmlFor="auth-email">Email Address</label>
+                <input
+                  id="auth-email"
+                  type="email"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  placeholder="e.g. sreejith191105@gmail.com"
+                  required
+                />
+
+                <label htmlFor="auth-pass">Password (min 8 characters)</label>
+                <input
+                  id="auth-pass"
+                  type="password"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  placeholder="••••••••"
+                  minLength={8}
+                  maxLength={72}
+                  required
+                />
+
+                <button type="submit" disabled={submittingAuth}>
+                  {submittingAuth
+                    ? "Processing…"
+                    : authMode === "login"
+                    ? "Log In to Account"
+                    : "Create Student Account"}
+                </button>
+              </form>
+
+              {/* Demo Quick-Login Buttons */}
+              <div className="quick-demo-section">
+                <p className="demo-hint-label">⚡ 1-Click Demo Login Shortcuts:</p>
+                <div className="demo-btn-row">
+                  <button
+                    type="button"
+                    className="secondary demo-btn"
+                    onClick={() => quickLogin("sreejith191105@gmail.com", "Password123!")}
+                  >
+                    👤 Student (sreejith)
+                  </button>
+                  <button
+                    type="button"
+                    className="secondary demo-btn"
+                    onClick={() => quickLogin("moderator@csmqp.edu", "Password123!")}
+                  >
+                    🛡️ Moderator Account
+                  </button>
+                </div>
+              </div>
+            </div>
           </div>
         ) : (
-          <form onSubmit={submit}>
-            <div className="mode-buttons" aria-label="Account action">
-              <button type="button" className={mode === "register" ? "selected" : "secondary"} onClick={() => setMode("register")}>Register</button>
-              <button type="button" className={mode === "login" ? "selected" : "secondary"} onClick={() => setMode("login")}>Log in</button>
-            </div>
-            <label htmlFor="email">Email</label>
-            <input id="email" type="email" value={email} onChange={(event) => setEmail(event.target.value)} required />
-            <label htmlFor="password">Password</label>
-            <input id="password" type="password" value={password} onChange={(event) => setPassword(event.target.value)} minLength={8} maxLength={72} required />
-            <button type="submit" disabled={submitting}>{submitting ? "Please wait…" : mode === "register" ? "Create account" : "Log in"}</button>
-          </form>
-        )}
-        {message && <p className="message" role="status">{message}</p>}
-      </section>
+          /* ================= AUTHENTICATED WORKSPACE ================= */
+          <div>
+            {/* Main Navigation Bar */}
+            <nav className="main-nav-tabs" aria-label="Platform navigation">
+              <button
+                type="button"
+                className={`nav-tab-item ${navTab === "questions" ? "active" : ""}`}
+                onClick={() => setNavTab("questions")}
+              >
+                📚 Question Bank
+              </button>
+              <button
+                type="button"
+                className={`nav-tab-item ${navTab === "quizzes" ? "active" : ""}`}
+                onClick={() => setNavTab("quizzes")}
+              >
+                🎯 Quizzes &amp; Rooms
+              </button>
+              <button
+                type="button"
+                className={`nav-tab-item ${navTab === "materials" ? "active" : ""}`}
+                onClick={() => setNavTab("materials")}
+              >
+                📁 Study Materials
+              </button>
+              <button
+                type="button"
+                className={`nav-tab-item ${navTab === "history" ? "active" : ""}`}
+                onClick={() => setNavTab("history")}
+              >
+                📊 Attempt History
+              </button>
+              {account.role === "moderator" && (
+                <button
+                  type="button"
+                  className={`nav-tab-item ${navTab === "moderation" ? "active" : ""}`}
+                  onClick={() => setNavTab("moderation")}
+                >
+                  🛡️ Moderation Queue
+                </button>
+              )}
+            </nav>
 
-      <p className="footer">Authentication is available locally. Future study features will use this signed-in session.</p>
-    </main>
+            {/* Quick Demo Switcher banner for video recording */}
+            <div className="demo-role-banner">
+              <span>
+                Signed in as <strong>{account.email}</strong> ({account.role})
+              </span>
+              <div className="role-switch-actions">
+                {account.role === "student" ? (
+                  <button
+                    type="button"
+                    className="small-btn demo-switch-btn"
+                    onClick={() => quickLogin("moderator@csmqp.edu", "Password123!")}
+                  >
+                    Switch to Moderator View ➔
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    className="small-btn demo-switch-btn"
+                    onClick={() => quickLogin("sreejith191105@gmail.com", "Password123!")}
+                  >
+                    Switch to Student View ➔
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {/* Render Selected Feature Tab */}
+            <div className="tab-viewport">
+              {navTab === "questions" && <QuestionBank />}
+              {navTab === "quizzes" && <Quizzes />}
+              {navTab === "materials" && <StudyMaterials />}
+              {navTab === "history" && <AttemptHistory />}
+              {navTab === "moderation" && <ModeratorQueue />}
+            </div>
+          </div>
+        )}
+      </main>
+
+      <footer className="app-footer">
+        <p>CSMQP Software Engineering Project • 3-Tier Architecture • FastAPI, React, PostgreSQL 15, S3 Storage</p>
+      </footer>
+    </div>
   );
 }
