@@ -676,29 +676,34 @@ def upload_study_material(
     finally:
         file.file.close()
 
+
 @app.get("/materials", response_model=list[StudyMaterialResponse])
 def list_study_materials(
+    search: str | None = None,
     subject: str | None = None,
     topic: str | None = None,
     tag: str | None = None,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """List study materials, optionally filtered by subject, topic, or tag."""
+    """List study materials with optional search and category filters."""
     stmt = select(StudyMaterial)
 
-    if subject:
+    if subject and subject.strip():
         stmt = stmt.where(StudyMaterial.subject == subject.strip())
 
-    if topic:
+    if topic and topic.strip():
         stmt = stmt.where(StudyMaterial.topic == topic.strip())
+
+    # Prepare the search term. Search is applied after fetching
+    # records so tags are included along with title and course code.
+    search_term = search.strip() if search else ""
 
     materials = list(
         db.scalars(stmt.order_by(StudyMaterial.created_at.desc())).all()
     )
 
-    # Tags are stored as a JSON list. Filter them in Python for exact,
-    # case-insensitive matching across supported database engines.
+    # Filter tags using case-insensitive exact matching.
     if tag and tag.strip():
         requested_tag = tag.strip().casefold()
         materials = [
@@ -708,6 +713,23 @@ def list_study_materials(
                 isinstance(existing_tag, str)
                 and existing_tag.casefold() == requested_tag
                 for existing_tag in (material.tags or [])
+            )
+        ]
+
+    # Also include materials whose tags contain the search term.
+    if search_term:
+        requested_search = search_term.casefold()
+        materials = [
+            material
+            for material in materials
+            if (
+                requested_search in material.title.casefold()
+                or requested_search in (material.course_code or "").casefold()
+                or any(
+                    isinstance(existing_tag, str)
+                    and requested_search in existing_tag.casefold()
+                    for existing_tag in (material.tags or [])
+                )
             )
         ]
 

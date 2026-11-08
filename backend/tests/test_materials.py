@@ -660,3 +660,155 @@ def test_filter_materials_by_combined_categories(
     materials = response.json()
     assert len(materials) == 1
     assert materials[0]["title"] == "DBMS SQL Notes"
+
+
+def test_search_materials_by_title(material_client, mock_storage):
+    token = register_and_login(material_client)
+
+    upload_test_material(
+        material_client, token,
+        title="Python Programming Notes",
+    )
+    upload_test_material(
+        material_client, token,
+        title="Database Management Notes",
+    )
+
+    response = material_client.get(
+        "/materials",
+        params={"search": "Python"},
+        headers=auth_headers(token),
+    )
+
+    assert response.status_code == 200
+    materials = response.json()
+    assert len(materials) == 1
+    assert materials[0]["title"] == "Python Programming Notes"
+
+
+def test_search_materials_by_course_code(material_client, mock_storage):
+    token = register_and_login(material_client)
+
+    upload_test_material(
+        material_client, token,
+        title="Database Notes",
+        course_code="CS301",
+    )
+    upload_test_material(
+        material_client, token,
+        title="Physics Notes",
+        course_code="PHY201",
+    )
+
+    response = material_client.get(
+        "/materials",
+        params={"search": "CS301"},
+        headers=auth_headers(token),
+    )
+
+    assert response.status_code == 200
+    materials = response.json()
+    assert len(materials) == 1
+    assert materials[0]["course_code"] == "CS301"
+
+
+def test_search_materials_by_tag(material_client, mock_storage):
+    token = register_and_login(material_client)
+
+    upload_test_material(
+        material_client, token,
+        title="Programming Notes",
+        tags="python, backend development",
+    )
+    upload_test_material(
+        material_client, token,
+        title="Database Notes",
+        tags="sql, database",
+    )
+
+    response = material_client.get(
+        "/materials",
+        params={"search": "backend"},
+        headers=auth_headers(token),
+    )
+
+    assert response.status_code == 200
+    materials = response.json()
+    assert len(materials) == 1
+    assert materials[0]["title"] == "Programming Notes"
+
+
+def test_search_materials_case_insensitive_partial(
+    material_client, mock_storage
+):
+    token = register_and_login(material_client)
+
+    upload_test_material(
+        material_client, token,
+        title="Python Programming Notes",
+    )
+
+    response = material_client.get(
+        "/materials",
+        params={"search": "pYtH"},
+        headers=auth_headers(token),
+    )
+
+    assert response.status_code == 200
+    materials = response.json()
+    assert len(materials) == 1
+    assert materials[0]["title"] == "Python Programming Notes"
+
+
+def test_search_materials_with_category_filters(
+    material_client, mock_storage
+):
+    token = register_and_login(material_client)
+
+    upload_test_material(
+        material_client, token,
+        title="Python Database Notes",
+        subject="Computer Science",
+        topic="Database",
+        tags="python, sql",
+    )
+    upload_test_material(
+        material_client, token,
+        title="Python Programming Notes",
+        subject="Computer Science",
+        topic="Programming",
+        tags="python, coding",
+    )
+
+    response = material_client.get(
+        "/materials",
+        params={
+            "search": "python",
+            "subject": "Computer Science",
+            "topic": "Database",
+        },
+        headers=auth_headers(token),
+    )
+
+    assert response.status_code == 200
+    materials = response.json()
+    assert len(materials) == 1
+    assert materials[0]["title"] == "Python Database Notes"
+
+
+def test_search_materials_no_results(material_client, mock_storage):
+    token = register_and_login(material_client)
+
+    upload_test_material(
+        material_client, token,
+        title="Python Notes",
+    )
+
+    response = material_client.get(
+        "/materials",
+        params={"search": "Artificial Intelligence XYZ"},
+        headers=auth_headers(token),
+    )
+
+    assert response.status_code == 200
+    assert response.json() == []
