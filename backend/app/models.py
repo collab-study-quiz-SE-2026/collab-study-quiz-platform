@@ -214,6 +214,7 @@ class QuizAttempt(Base):
     answers: Mapped[dict] = mapped_column(JSON, default=dict)
     question_timings: Mapped[dict] = mapped_column(JSON, default=dict)
     score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    correct_answer_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     started_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(UTC)
     )

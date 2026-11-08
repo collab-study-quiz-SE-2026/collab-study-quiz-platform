@@ -109,12 +109,23 @@ def generate_room_code(db: Session) -> str:
 
 
 def attempt_response(attempt: QuizAttempt) -> dict:
+    evaluated = (
+        attempt.status in (AttemptStatus.COMPLETED, AttemptStatus.EXPIRED)
+        and attempt.correct_answer_count is not None
+    )
+    total_questions = len(attempt.quiz.questions)
+    correct_answers = attempt.correct_answer_count if evaluated else None
     return {
         "id": attempt.id,
         "quiz_id": attempt.quiz_id,
         "student_id": attempt.student_id,
         "status": attempt.status,
         "score": attempt.score,
+        "accuracy": attempt.score if evaluated else None,
+        "correct_answers": correct_answers,
+        "incorrect_answers": (
+            total_questions - correct_answers if evaluated else None
+        ),
         "started_at": attempt.started_at,
         "completed_at": attempt.completed_at,
         "answered_question_ids": [int(question_id) for question_id in attempt.answers],
@@ -158,6 +169,27 @@ def attempt_expired(attempt: QuizAttempt, now: datetime) -> bool:
     if started_at.tzinfo is None:
         started_at = started_at.replace(tzinfo=UTC)
     return now > started_at + timedelta(minutes=attempt.quiz.duration_minutes)
+
+
+def evaluate_attempt(attempt: QuizAttempt) -> int:
+    """Count correct submitted answers; unanswered questions count as incorrect."""
+    return sum(
+        int(
+            str(link.question.id) in attempt.answers
+            and attempt.answers[str(link.question.id)]
+            == link.question.correct_answer_index
+        )
+        for link in attempt.quiz.questions
+    )
+
+
+def save_attempt_result(attempt: QuizAttempt, now: datetime, expired: bool) -> None:
+    total_questions = len(attempt.quiz.questions)
+    correct_answers = evaluate_attempt(attempt)
+    attempt.correct_answer_count = correct_answers
+    attempt.score = round(correct_answers * 100 / total_questions) if total_questions else 0
+    attempt.status = AttemptStatus.EXPIRED if expired else AttemptStatus.COMPLETED
+    attempt.completed_at = now
 
 
 def require_moderator(current_user: User = Depends(get_current_user)) -> User:
@@ -400,8 +432,7 @@ def submit_answer(
         raise HTTPException(status_code=409, detail="Quiz session is no longer active")
     now = datetime.now(UTC)
     if attempt_expired(attempt, now):
-        attempt.status = AttemptStatus.EXPIRED
-        attempt.completed_at = now
+        save_attempt_result(attempt, now, expired=True)
         db.commit()
         raise HTTPException(status_code=409, detail="Quiz time limit has expired")
     selected = next(
@@ -445,19 +476,7 @@ def complete_quiz(
     if attempt.status != AttemptStatus.ACTIVE:
         raise HTTPException(status_code=409, detail="Quiz session is no longer active")
     now = datetime.now(UTC)
-    if attempt_expired(attempt, now):
-        attempt.status = AttemptStatus.EXPIRED
-        score = 0
-    else:
-        correct = sum(
-            int(str(link.question.id) in attempt.answers
-                and attempt.answers[str(link.question.id)] == link.question.correct_answer_index)
-            for link in attempt.quiz.questions
-        )
-        score = round(correct * 100 / len(attempt.quiz.questions))
-        attempt.status = AttemptStatus.COMPLETED
-    attempt.score = score
-    attempt.completed_at = now
+    save_attempt_result(attempt, now, expired=attempt_expired(attempt, now))
     db.commit()
     db.refresh(attempt)
     return attempt_response(attempt)
