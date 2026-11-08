@@ -1,7 +1,7 @@
 ﻿import pytest
 from pydantic import ValidationError
 
-from app.schemas.questions import QuestionCreate
+from app.question_schemas import QuestionCreate
 
 
 def valid_question(**overrides):
