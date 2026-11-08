@@ -542,6 +542,8 @@ ALLOWED_EXTENSIONS = {
 def upload_study_material(
     title: str = Form(..., min_length=1, max_length=200),
     course_code: str = Form(..., min_length=1, max_length=50),
+    subject: str = Form(default="General", min_length=1, max_length=100),
+    topic: str = Form(default="General", min_length=1, max_length=100),
     tags: str = Form(default=""),
     file: UploadFile = File(...),
     current_user: User = Depends(get_current_user),
@@ -549,12 +551,20 @@ def upload_study_material(
 ):
     title = title.strip()
     course_code = course_code.strip()
+    subject = subject.strip()
+    topic = topic.strip()
 
     if not title:
         raise HTTPException(status_code=422, detail="Title cannot be blank")
 
     if not course_code:
         raise HTTPException(status_code=422, detail="Course code cannot be blank")
+
+    if not subject:
+        raise HTTPException(status_code=422, detail="Subject cannot be blank")
+
+    if not topic:
+        raise HTTPException(status_code=422, detail="Topic cannot be blank")
 
     extension = Path(file.filename or "").suffix.lower()
 
@@ -626,6 +636,8 @@ def upload_study_material(
         material = StudyMaterial(
             title=title,
             course_code=course_code,
+            subject=subject,
+            topic=topic,
             tags=tag_list,
             original_filename=file.filename or "uploaded-file",
             storage_key=storage_key,
@@ -666,12 +678,38 @@ def upload_study_material(
 
 @app.get("/materials", response_model=list[StudyMaterialResponse])
 def list_study_materials(
+    subject: str | None = None,
+    topic: str | None = None,
+    tag: str | None = None,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    materials = db.scalars(
-        select(StudyMaterial).order_by(StudyMaterial.created_at.desc())
-    ).all()
+    """List study materials, optionally filtered by subject, topic, or tag."""
+    stmt = select(StudyMaterial)
+
+    if subject:
+        stmt = stmt.where(StudyMaterial.subject == subject.strip())
+
+    if topic:
+        stmt = stmt.where(StudyMaterial.topic == topic.strip())
+
+    materials = list(
+        db.scalars(stmt.order_by(StudyMaterial.created_at.desc())).all()
+    )
+
+    # Tags are stored as a JSON list. Filter them in Python for exact,
+    # case-insensitive matching across supported database engines.
+    if tag and tag.strip():
+        requested_tag = tag.strip().casefold()
+        materials = [
+            material
+            for material in materials
+            if any(
+                isinstance(existing_tag, str)
+                and existing_tag.casefold() == requested_tag
+                for existing_tag in (material.tags or [])
+            )
+        ]
 
     return materials
 

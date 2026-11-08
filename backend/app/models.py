@@ -99,12 +99,16 @@ class StudyMaterial(Base):
     __tablename__ = "study_materials"
     __table_args__ = (
         Index("ix_study_materials_course_code", "course_code"),
+        Index("ix_study_materials_subject", "subject"),
+        Index("ix_study_materials_topic", "topic"),
         Index("ix_study_materials_uploader_id", "uploader_id"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     title: Mapped[str] = mapped_column(String(200))
     course_code: Mapped[str] = mapped_column(String(50))
+    subject: Mapped[str] = mapped_column(String(100), default="General")
+    topic: Mapped[str] = mapped_column(String(100), default="General")
     tags: Mapped[list[str]] = mapped_column(JSON, default=list)
 
     original_filename: Mapped[str] = mapped_column(String(255))

@@ -249,6 +249,8 @@ def test_upload_saves_metadata(material_client, mock_storage):
         data={
             "title": "Operating Systems",
             "course_code": "OS101",
+            "subject": "Computer Science",
+            "topic": "Operating Systems",
             "tags": "processes, scheduling",
         },
         files={
@@ -275,6 +277,8 @@ def test_upload_saves_metadata(material_client, mock_storage):
         assert material is not None
         assert material.title == "Operating Systems"
         assert material.course_code == "OS101"
+        assert material.subject == "Computer Science"
+        assert material.topic == "Operating Systems"
         assert material.tags == ["processes", "scheduling"]
         assert material.original_filename == "os.md"
         assert material.file_size == len(b"# Operating Systems")
@@ -361,18 +365,23 @@ def upload_test_material(
     filename="notes.md",
     content=b"# Test Notes",
     content_type="text/markdown",
+    subject="General",
+    topic="General",
+    tags="testing, notes",
+    course_code="TEST101",
 ):
     return client.post(
         "/materials/upload",
         headers=auth_headers(token),
         data={
             "title": title,
-            "course_code": "TEST101",
-            "tags": "testing, notes",
+            "course_code": course_code,
+            "subject": subject,
+            "topic": topic,
+            "tags": tags,
         },
         files={"file": (filename, content, content_type)},
     )
-
 
 def test_list_materials_requires_authentication(material_client):
     response = material_client.get("/materials")
@@ -517,3 +526,137 @@ def test_download_storage_unavailable(material_client, mock_storage):
 
     assert response.status_code == 503
     assert response.json()["detail"] == "Storage service is unavailable"
+
+
+def test_filter_materials_by_subject(material_client, mock_storage):
+    token = register_and_login(material_client)
+
+    upload_test_material(
+        material_client,
+        token,
+        title="DBMS Notes",
+        subject="Computer Science",
+        topic="Database",
+    )
+    upload_test_material(
+        material_client,
+        token,
+        title="Physics Notes",
+        subject="Physics",
+        topic="Mechanics",
+    )
+
+    response = material_client.get(
+        "/materials",
+        params={"subject": "Computer Science"},
+        headers=auth_headers(token),
+    )
+
+    assert response.status_code == 200
+    materials = response.json()
+    assert len(materials) == 1
+    assert materials[0]["title"] == "DBMS Notes"
+
+
+def test_filter_materials_by_topic(material_client, mock_storage):
+    token = register_and_login(material_client)
+
+    upload_test_material(
+        material_client,
+        token,
+        title="SQL Notes",
+        subject="Computer Science",
+        topic="Database",
+    )
+    upload_test_material(
+        material_client,
+        token,
+        title="Python Notes",
+        subject="Computer Science",
+        topic="Programming",
+    )
+
+    response = material_client.get(
+        "/materials",
+        params={"topic": "Database"},
+        headers=auth_headers(token),
+    )
+
+    assert response.status_code == 200
+    materials = response.json()
+    assert len(materials) == 1
+    assert materials[0]["title"] == "SQL Notes"
+
+
+def test_filter_materials_by_tag(material_client, mock_storage):
+    token = register_and_login(material_client)
+
+    upload_test_material(
+        material_client,
+        token,
+        title="SQL Notes",
+        tags="database, sql, queries",
+    )
+    upload_test_material(
+        material_client,
+        token,
+        title="Python Notes",
+        tags="python, programming",
+    )
+
+    response = material_client.get(
+        "/materials",
+        params={"tag": "SQL"},
+        headers=auth_headers(token),
+    )
+
+    assert response.status_code == 200
+    materials = response.json()
+    assert len(materials) == 1
+    assert materials[0]["title"] == "SQL Notes"
+
+
+def test_filter_materials_by_combined_categories(
+    material_client, mock_storage
+):
+    token = register_and_login(material_client)
+
+    upload_test_material(
+        material_client,
+        token,
+        title="DBMS SQL Notes",
+        subject="Computer Science",
+        topic="Database",
+        tags="sql, database",
+    )
+    upload_test_material(
+        material_client,
+        token,
+        title="Python Notes",
+        subject="Computer Science",
+        topic="Programming",
+        tags="python, coding",
+    )
+    upload_test_material(
+        material_client,
+        token,
+        title="Physics Database Notes",
+        subject="Physics",
+        topic="Database",
+        tags="sql, physics",
+    )
+
+    response = material_client.get(
+        "/materials",
+        params={
+            "subject": "Computer Science",
+            "topic": "Database",
+            "tag": "SQL",
+        },
+        headers=auth_headers(token),
+    )
+
+    assert response.status_code == 200
+    materials = response.json()
+    assert len(materials) == 1
+    assert materials[0]["title"] == "DBMS SQL Notes"

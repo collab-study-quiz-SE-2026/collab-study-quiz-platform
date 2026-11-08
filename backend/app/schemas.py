@@ -202,6 +202,8 @@ class StudyMaterialResponse(BaseModel):
     id: int
     title: str
     course_code: str
+    subject: str
+    topic: str
     tags: list[str]
     original_filename: str
     file_type: str
