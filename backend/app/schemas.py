@@ -10,7 +10,7 @@ from pydantic import (
     model_validator,
 )
 
-from app.models import QuestionStatus, UserRole
+from app.models import AttemptStatus, QuestionStatus, QuizStatus, UserRole
 
 
 class RegistrationRequest(BaseModel):
@@ -67,6 +67,64 @@ class QuizCreate(BaseModel):
         if len(ids) != len(set(ids)):
             raise ValueError("Question IDs must be unique")
         return ids
+
+
+class QuizQuestionResponse(BaseModel):
+    id: int
+    question_text: str
+    options: list[str]
+    subject: str
+    topic: str
+    difficulty: str
+
+
+class QuizResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    title: str
+    description: str
+    duration_minutes: int
+    max_attempts: int
+    room_code: str
+    status: QuizStatus
+    host_id: int
+    created_at: datetime
+    started_at: datetime | None
+    questions: list[QuizQuestionResponse]
+
+
+class AnswerSubmission(BaseModel):
+    question_id: int = Field(gt=0)
+    answer_index: int = Field(ge=0)
+    time_spent_seconds: int = Field(ge=0, le=86400)
+
+
+class QuizAttemptResponse(BaseModel):
+    id: int
+    quiz_id: int
+    student_id: int
+    status: AttemptStatus
+    score: int | None
+    started_at: datetime
+    completed_at: datetime | None
+    answered_question_ids: list[int]
+    question_timings: dict[str, int]
+    questions: list[QuizQuestionResponse]
+
+
+class QuizAttemptHistoryResponse(BaseModel):
+    id: int
+    quiz_id: int
+    quiz_title: str
+    student_id: int
+    status: AttemptStatus
+    score: int | None
+    answers: dict[str, int]
+    question_timings: dict[str, int]
+    started_at: datetime
+    completed_at: datetime | None
+    duration_seconds: int | None
 
 
 class QuestionCreate(BaseModel):
