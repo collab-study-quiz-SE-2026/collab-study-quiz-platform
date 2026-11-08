@@ -1,10 +1,24 @@
 from datetime import UTC, datetime, timedelta
 import os
 from contextlib import closing
+from pathlib import Path
+from uuid import uuid4
+from urllib.parse import quote
 
 import psycopg
 from botocore.exceptions import BotoCoreError, ClientError
-from fastapi import Depends, FastAPI, HTTPException, WebSocket, WebSocketDisconnect, status
+from fastapi import (
+    Depends,
+    FastAPI,
+    File,
+    Form,
+    HTTPException,
+    Response,
+    UploadFile,
+    WebSocket,
+    WebSocketDisconnect,
+    status,
+)
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session, selectinload
@@ -19,6 +33,7 @@ from app.models import (
     QuizAttempt,
     QuizQuestion,
     QuizStatus,
+    StudyMaterial,
     User,
     UserRole,
 )
@@ -39,6 +54,7 @@ from app.schemas import (
     RegistrationResponse,
     TokenResponse,
     UserResponse,
+    StudyMaterialResponse,
 )
 from app.storage import get_storage_client
 
@@ -900,3 +916,275 @@ async def websocket_health(websocket: WebSocket):
             await websocket.send_text("pong" if message == "ping" else "Send ping")
     except WebSocketDisconnect:
         pass
+
+
+MAX_UPLOAD_SIZE = 25 * 1024 * 1024
+
+ALLOWED_EXTENSIONS = {
+    ".pdf": ("pdf", "application/pdf"),
+    ".md": ("markdown", "text/markdown"),
+    ".markdown": ("markdown", "text/markdown"),
+}
+
+
+@app.post(
+    "/materials/upload",
+    response_model=StudyMaterialResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def upload_study_material(
+    title: str = Form(..., min_length=1, max_length=200),
+    course_code: str = Form(..., min_length=1, max_length=50),
+    subject: str = Form(default="General", min_length=1, max_length=100),
+    topic: str = Form(default="General", min_length=1, max_length=100),
+    tags: str = Form(default=""),
+    file: UploadFile = File(...),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    title = title.strip()
+    course_code = course_code.strip()
+    subject = subject.strip()
+    topic = topic.strip()
+
+    if not title:
+        raise HTTPException(status_code=422, detail="Title cannot be blank")
+
+    if not course_code:
+        raise HTTPException(status_code=422, detail="Course code cannot be blank")
+
+    if not subject:
+        raise HTTPException(status_code=422, detail="Subject cannot be blank")
+
+    if not topic:
+        raise HTTPException(status_code=422, detail="Topic cannot be blank")
+
+    extension = Path(file.filename or "").suffix.lower()
+
+    if extension not in ALLOWED_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail="Only PDF and Markdown files are allowed",
+        )
+
+    file_type, mime_type = ALLOWED_EXTENSIONS[extension]
+
+    if file.content_type not in (mime_type, "application/octet-stream"):
+        raise HTTPException(
+            status_code=400,
+            detail="File content type does not match the file extension",
+        )
+
+    tag_list = list(dict.fromkeys(
+        tag.strip() for tag in tags.split(",") if tag.strip()
+    ))
+
+    storage_key = f"study-materials/{uuid4()}{extension}"
+    payload = bytearray()
+
+    try:
+        while True:
+            chunk = file.file.read(1024 * 1024)
+
+            if not chunk:
+                break
+
+            payload.extend(chunk)
+
+            if len(payload) > MAX_UPLOAD_SIZE:
+                raise HTTPException(
+                    status_code=413,
+                    detail="File size exceeds the 25 MB limit",
+                )
+
+        if not payload:
+            raise HTTPException(
+                status_code=400,
+                detail="Uploaded file cannot be empty",
+            )
+
+        if extension == ".pdf" and not payload.startswith(b"%PDF-"):
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid PDF file content",
+            )
+
+        if extension in (".md", ".markdown"):
+            try:
+                payload.decode("utf-8")
+            except UnicodeDecodeError:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Markdown file must contain valid UTF-8 text",
+                ) from None
+
+        with closing(get_storage_client()) as storage:
+            storage.put_object(
+                Bucket=os.environ["S3_BUCKET"],
+                Key=storage_key,
+                Body=bytes(payload),
+                ContentType=mime_type,
+            )
+
+        material = StudyMaterial(
+            title=title,
+            course_code=course_code,
+            subject=subject,
+            topic=topic,
+            tags=tag_list,
+            original_filename=file.filename or "uploaded-file",
+            storage_key=storage_key,
+            file_type=file_type,
+            mime_type=mime_type,
+            file_size=len(payload),
+            uploader_id=current_user.id,
+        )
+
+        db.add(material)
+        db.commit()
+        db.refresh(material)
+
+        return material
+
+    except HTTPException:
+        raise
+
+    except Exception:
+        db.rollback()
+
+        try:
+            with closing(get_storage_client()) as storage:
+                storage.delete_object(
+                    Bucket=os.environ["S3_BUCKET"],
+                    Key=storage_key,
+                )
+        except Exception:
+            pass
+
+        raise HTTPException(
+            status_code=500,
+            detail="Unable to upload study material",
+        ) from None
+
+    finally:
+        file.file.close()
+
+
+@app.get("/materials", response_model=list[StudyMaterialResponse])
+def list_study_materials(
+    search: str | None = None,
+    subject: str | None = None,
+    topic: str | None = None,
+    tag: str | None = None,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """List study materials with optional search and category filters."""
+    stmt = select(StudyMaterial)
+
+    if subject and subject.strip():
+        stmt = stmt.where(StudyMaterial.subject == subject.strip())
+
+    if topic and topic.strip():
+        stmt = stmt.where(StudyMaterial.topic == topic.strip())
+
+    # Prepare the search term. Search is applied after fetching
+    # records so tags are included along with title and course code.
+    search_term = search.strip() if search else ""
+
+    materials = list(
+        db.scalars(stmt.order_by(StudyMaterial.created_at.desc())).all()
+    )
+
+    # Filter tags using case-insensitive exact matching.
+    if tag and tag.strip():
+        requested_tag = tag.strip().casefold()
+        materials = [
+            material
+            for material in materials
+            if any(
+                isinstance(existing_tag, str)
+                and existing_tag.casefold() == requested_tag
+                for existing_tag in (material.tags or [])
+            )
+        ]
+
+    # Also include materials whose tags contain the search term.
+    if search_term:
+        requested_search = search_term.casefold()
+        materials = [
+            material
+            for material in materials
+            if (
+                requested_search in material.title.casefold()
+                or requested_search in (material.course_code or "").casefold()
+                or any(
+                    isinstance(existing_tag, str)
+                    and requested_search in existing_tag.casefold()
+                    for existing_tag in (material.tags or [])
+                )
+            )
+        ]
+
+    return materials
+
+@app.get("/materials/{material_id}/download")
+def download_study_material(
+    material_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    material = db.get(StudyMaterial, material_id)
+
+    if material is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Study material not found",
+        )
+
+    try:
+        with closing(get_storage_client()) as storage:
+            stored_object = storage.get_object(
+                Bucket=os.environ["S3_BUCKET"],
+                Key=material.storage_key,
+            )
+            file_content = stored_object["Body"].read()
+            stored_object["Body"].close()
+
+    except ClientError as exc:
+        error_code = exc.response.get("Error", {}).get("Code", "")
+
+        if error_code in ("NoSuchKey", "404", "NotFound"):
+            raise HTTPException(
+                status_code=404,
+                detail="Study material file not found in storage",
+            ) from None
+
+        raise HTTPException(
+            status_code=503,
+            detail="Storage service is unavailable",
+        ) from None
+
+    except BotoCoreError:
+        raise HTTPException(
+            status_code=503,
+            detail="Storage service is unavailable",
+        ) from None
+
+    except Exception:
+        raise HTTPException(
+            status_code=503,
+            detail="Unable to retrieve study material",
+        ) from None
+
+    filename = quote(Path(material.original_filename).name)
+
+    return Response(
+        content=file_content,
+        media_type=material.mime_type,
+        headers={
+            "Content-Disposition": f"attachment; filename*=UTF-8''{filename}",
+            "Content-Length": str(len(file_content)),
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
