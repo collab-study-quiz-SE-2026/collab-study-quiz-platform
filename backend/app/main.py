@@ -55,6 +55,8 @@ from app.schemas import (
     TokenResponse,
     UserResponse,
     StudyMaterialResponse,
+    TopicPerformanceDetail,
+    TopicPerformanceResponse,
 )
 from app.storage import get_storage_client
 
@@ -543,6 +545,200 @@ def list_student_attempt_history(
     if current_user.id != student_id:
         raise HTTPException(status_code=403, detail="You can only access your own attempt history")
     return list_my_attempt_history(current_user=current_user, db=db)
+
+
+def build_topic_performance(
+    student_id: int,
+    db: Session,
+    subject: str | None = None,
+) -> dict:
+    attempts = db.scalars(
+        select(QuizAttempt)
+        .options(
+            selectinload(QuizAttempt.quiz)
+            .selectinload(Quiz.questions)
+            .selectinload(QuizQuestion.question)
+        )
+        .where(
+            QuizAttempt.student_id == student_id,
+            QuizAttempt.status == AttemptStatus.COMPLETED,
+        )
+        .order_by(QuizAttempt.completed_at.asc(), QuizAttempt.id.asc())
+    ).all()
+
+    student_topic_data: dict[tuple[str, str], dict] = {}
+    total_questions_evaluated = 0
+
+    for attempt in attempts:
+        question_by_id = {
+            str(link.question.id): link.question for link in attempt.quiz.questions
+        }
+        for q_id_str, answer_index in attempt.answers.items():
+            question = question_by_id.get(str(q_id_str))
+            if question is None:
+                continue
+
+            q_subject = question.subject or "General"
+            q_topic = question.topic
+
+            if subject and q_subject.lower() != subject.strip().lower():
+                continue
+
+            key = (q_subject, q_topic)
+            if key not in student_topic_data:
+                student_topic_data[key] = {
+                    "total_questions": 0,
+                    "correct_answers": 0,
+                    "timings": [],
+                }
+
+            student_topic_data[key]["total_questions"] += 1
+            total_questions_evaluated += 1
+            if answer_index == question.correct_answer_index:
+                student_topic_data[key]["correct_answers"] += 1
+
+            timing = attempt.question_timings.get(str(q_id_str))
+            if timing is None and str(q_id_str).isdigit():
+                timing = attempt.question_timings.get(int(q_id_str))
+            if timing is not None and isinstance(timing, (int, float)):
+                student_topic_data[key]["timings"].append(timing)
+
+    # Cohort analysis across all completed attempts for relevant topics
+    all_completed_attempts = db.scalars(
+        select(QuizAttempt)
+        .options(
+            selectinload(QuizAttempt.quiz)
+            .selectinload(Quiz.questions)
+            .selectinload(QuizQuestion.question)
+        )
+        .where(
+            QuizAttempt.status == AttemptStatus.COMPLETED,
+        )
+    ).all()
+
+    cohort_by_topic: dict[str, dict[int, list[int]]] = {}
+    for a in all_completed_attempts:
+        q_map = {str(link.question.id): link.question for link in a.quiz.questions}
+        for q_id_str, ans_idx in a.answers.items():
+            q = q_map.get(str(q_id_str))
+            if q is None:
+                continue
+            t_name = q.topic
+            if t_name not in cohort_by_topic:
+                cohort_by_topic[t_name] = {}
+            if a.student_id not in cohort_by_topic[t_name]:
+                cohort_by_topic[t_name][a.student_id] = [0, 0]
+            cohort_by_topic[t_name][a.student_id][1] += 1
+            if ans_idx == q.correct_answer_index:
+                cohort_by_topic[t_name][a.student_id][0] += 1
+
+    topics_list = []
+    strong_topics = []
+    weak_topics = []
+
+    for (q_subject, q_topic), data in sorted(
+        student_topic_data.items(), key=lambda item: (item[0][0], item[0][1])
+    ):
+        total_q = data["total_questions"]
+        correct_q = data["correct_answers"]
+        accuracy = round(100.0 * correct_q / total_q, 2) if total_q > 0 else 0.0
+
+        avg_time = (
+            round(sum(data["timings"]) / len(data["timings"]), 2)
+            if data["timings"]
+            else None
+        )
+
+        if accuracy >= 75.0:
+            strength = "strong"
+            strong_topics.append(q_topic)
+        elif accuracy >= 50.0:
+            strength = "moderate"
+        else:
+            strength = "weak"
+            weak_topics.append(q_topic)
+
+        cohort_students = cohort_by_topic.get(q_topic, {})
+        cohort_percentile = None
+        if cohort_students:
+            cohort_accuracies = [
+                (stats[0] / stats[1] * 100.0)
+                for stats in cohort_students.values()
+                if stats[1] > 0
+            ]
+            if cohort_accuracies:
+                cohort_percentile = round(
+                    100.0 * sum(c_acc <= accuracy for c_acc in cohort_accuracies)
+                    / len(cohort_accuracies),
+                    2,
+                )
+
+        topics_list.append(
+            {
+                "subject": q_subject,
+                "topic": q_topic,
+                "total_questions": total_q,
+                "correct_answers": correct_q,
+                "accuracy_percentage": accuracy,
+                "average_time_seconds": avg_time,
+                "cohort_percentile": cohort_percentile,
+                "strength_level": strength,
+            }
+        )
+
+    return {
+        "student_id": student_id,
+        "total_quizzes_evaluated": len(attempts),
+        "total_questions_evaluated": total_questions_evaluated,
+        "topics": topics_list,
+        "strong_topics": list(dict.fromkeys(strong_topics)),
+        "weak_topics": list(dict.fromkeys(weak_topics)),
+    }
+
+
+@app.get("/analytics/topics", response_model=TopicPerformanceResponse)
+@app.get("/analytics/topics/me", response_model=TopicPerformanceResponse)
+@app.get(
+    "/api/v1/analytics/topics",
+    response_model=TopicPerformanceResponse,
+    include_in_schema=False,
+)
+@app.get(
+    "/api/v1/analytics/topics/me",
+    response_model=TopicPerformanceResponse,
+    include_in_schema=False,
+)
+def read_my_topic_performance(
+    subject: str | None = None,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    return build_topic_performance(current_user.id, db, subject=subject)
+
+
+@app.get(
+    "/users/{student_id}/analytics/topics",
+    response_model=TopicPerformanceResponse,
+)
+@app.get(
+    "/api/v1/users/{student_id}/analytics/topics",
+    response_model=TopicPerformanceResponse,
+    include_in_schema=False,
+)
+def read_student_topic_performance(
+    student_id: int,
+    subject: str | None = None,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if current_user.id != student_id and current_user.role != UserRole.MODERATOR:
+        raise HTTPException(
+            status_code=403,
+            detail="You can only access your own topic performance analytics",
+        )
+    if db.get(User, student_id) is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    return build_topic_performance(student_id, db, subject=subject)
 
 
 @app.get("/auth/users/{user_id}", response_model=UserResponse)
