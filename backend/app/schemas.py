@@ -127,6 +127,37 @@ class QuizAttemptHistoryResponse(BaseModel):
     duration_seconds: int | None
 
 
+class PerformanceTopicResponse(BaseModel):
+    topic: str
+    answered_questions: int
+    correct_answers: int
+    accuracy_percentage: float
+
+
+class PerformanceRecentResultResponse(BaseModel):
+    attempt_id: int
+    quiz_id: int
+    quiz_title: str
+    score: int
+    completed_at: datetime
+
+
+class PerformanceTrendResponse(BaseModel):
+    date: datetime
+    score: int
+
+
+class PerformanceDashboardResponse(BaseModel):
+    student_id: int
+    total_quizzes_attempted: int
+    average_score: float | None
+    average_time_per_question_seconds: float | None
+    cohort_percentile: float | None
+    topic_accuracy: list[PerformanceTopicResponse]
+    recent_results: list[PerformanceRecentResultResponse]
+    trend: list[PerformanceTrendResponse]
+
+
 class QuestionCreate(BaseModel):
     question_text: str = Field(min_length=1)
     options: list[str] = Field(min_length=4, max_length=4)
