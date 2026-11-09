@@ -53,12 +53,23 @@ def get_current_user(
     if credentials is None:
         raise unauthorized
 
+    return get_user_from_token(credentials.credentials, db)
+
+
+def get_user_from_token(token: str, db: Session) -> User:
+    """Validate an access token for HTTP requests and WebSocket connections."""
+    unauthorized = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Authentication required",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
     secret = os.getenv("JWT_SECRET_KEY")
     if not secret:
         raise HTTPException(status_code=503, detail="Authentication unavailable")
 
     try:
-        payload = jwt.decode(credentials.credentials, secret, algorithms=[JWT_ALGORITHM])
+        payload = jwt.decode(token, secret, algorithms=[JWT_ALGORITHM])
         user_id = int(payload["sub"])
         token_version = int(payload["token_version"])
     except (InvalidTokenError, KeyError, TypeError, ValueError):

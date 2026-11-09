@@ -1,7 +1,10 @@
 from datetime import UTC, datetime, timedelta
+import asyncio
+import json
 import os
 from contextlib import closing
 from pathlib import Path
+from time import monotonic
 from uuid import uuid4
 from urllib.parse import quote
 
@@ -23,8 +26,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session, selectinload
 
-from app.auth import create_access_token, get_current_user, hash_password, verify_password
-from app.database import get_db
+from app.auth import (
+    create_access_token,
+    get_current_user,
+    get_user_from_token,
+    hash_password,
+    verify_password,
+)
+from app.database import SessionLocal, get_db
 from app.models import (
     AttemptStatus,
     Question,
@@ -57,6 +66,7 @@ from app.schemas import (
     StudyMaterialResponse,
 )
 from app.storage import get_storage_client
+from app.quiz_realtime import ROUND_SECONDS, broadcast, rooms, send_error
 
 app = FastAPI()
 frontend_origins = [origin.strip() for origin in os.getenv(
@@ -935,6 +945,356 @@ async def websocket_health(websocket: WebSocket):
             await websocket.send_text("pong" if message == "ping" else "Send ping")
     except WebSocketDisconnect:
         pass
+
+
+async def finish_live_round(quiz_id: int) -> None:
+    """Evaluate the current question and reveal its key after the round ends."""
+    room = rooms.get(quiz_id)
+    if room is None:
+        return
+
+    async with room["lock"]:
+        if not room["round_started"]:
+            return
+        timer_task = room["timer_task"]
+        if timer_task is not None and timer_task is not asyncio.current_task():
+            timer_task.cancel()
+
+        with SessionLocal() as db:
+            quiz = load_quiz(db, quiz_id)
+            if quiz is None:
+                room["round_started"] = False
+                return
+
+            question_link = quiz.questions[room["question_index"]]
+            question = question_link.question
+            attempts = db.scalars(
+                select(QuizAttempt)
+                .options(
+                    selectinload(QuizAttempt.quiz)
+                    .selectinload(Quiz.questions)
+                    .selectinload(QuizQuestion.question)
+                )
+                .where(
+                    QuizAttempt.quiz_id == quiz_id,
+                    QuizAttempt.student_id.in_(room["expected"]),
+                    QuizAttempt.status == AttemptStatus.ACTIVE,
+                )
+            ).all()
+
+            final_round = room["question_index"] == len(quiz.questions) - 1
+            standings = []
+            now = datetime.now(UTC)
+            for attempt in attempts:
+                if final_round:
+                    save_attempt_result(attempt, now, expired=False)
+                    score = attempt.score
+                    correct_count = attempt.correct_answer_count
+                else:
+                    answered = [
+                        link
+                        for link in quiz.questions
+                        if str(link.question.id) in attempt.answers
+                    ]
+                    correct_count = sum(
+                        attempt.answers[str(link.question.id)]
+                        == link.question.correct_answer_index
+                        for link in answered
+                    )
+                    score = (
+                        round(correct_count * 100 / len(answered)) if answered else 0
+                    )
+                standings.append(
+                    {
+                        "student_id": attempt.student_id,
+                        "score": score,
+                        "correct_answers": correct_count,
+                    }
+                )
+
+            if final_round:
+                quiz.status = QuizStatus.COMPLETED
+            db.commit()
+
+        standings.sort(key=lambda item: (-item["correct_answers"], item["student_id"]))
+        room["round_started"] = False
+        room["question_index"] += 1
+        room["submitted"] = set()
+        room["expected"] = set()
+        room["current_question_message"] = None
+        room["timer_task"] = None
+        room["last_broadcast_ms"] = await broadcast(
+            room,
+            {
+                "type": "ROUND_END",
+                "question_id": question.id,
+                "correct_answer_index": question.correct_answer_index,
+                "explanation": question.explanation,
+                "standings": standings,
+                "quiz_complete": final_round,
+            },
+        )
+
+    if not room["connections"]:
+        rooms.pop(quiz_id, None)
+
+
+async def end_round_after_timer(quiz_id: int) -> None:
+    """End an unanswered round when its 30-second timer expires."""
+    await asyncio.sleep(ROUND_SECONDS)
+    await finish_live_round(quiz_id)
+
+
+@app.websocket("/ws/quizzes/{room_code}")
+async def quiz_websocket(websocket: WebSocket, room_code: str):
+    """Join a quiz room using subprotocols csmqp.v1 and bearer.<access-token>."""
+    origin = websocket.headers.get("origin")
+    if origin and origin not in frontend_origins:
+        await websocket.close(code=1008)
+        return
+
+    token = next(
+        (
+            value.removeprefix("bearer.")
+            for value in websocket.scope.get("subprotocols", [])
+            if value.startswith("bearer.")
+        ),
+        None,
+    )
+    if token is None:
+        await websocket.close(code=1008)
+        return
+
+    with SessionLocal() as db:
+        try:
+            user = get_user_from_token(token, db)
+        except HTTPException:
+            await websocket.close(code=1008)
+            return
+
+        quiz = db.scalar(
+            select(Quiz)
+            .options(
+                selectinload(Quiz.questions).selectinload(QuizQuestion.question)
+            )
+            .where(Quiz.room_code == room_code.upper())
+        )
+        if quiz is None or quiz.status not in (QuizStatus.PUBLISHED, QuizStatus.LIVE):
+            await websocket.close(code=1008)
+            return
+
+        if quiz.host_id != user.id:
+            attempt = db.scalar(
+                select(QuizAttempt.id).where(
+                    QuizAttempt.quiz_id == quiz.id,
+                    QuizAttempt.student_id == user.id,
+                    QuizAttempt.status == AttemptStatus.ACTIVE,
+                )
+            )
+            if attempt is None:
+                await websocket.close(code=1008)
+                return
+
+        quiz_id = quiz.id
+        quiz_title = quiz.title
+        question_count = len(quiz.questions)
+        host_id = quiz.host_id
+
+    room = rooms.setdefault(
+        quiz_id,
+        {
+            "connections": {},
+            "lock": asyncio.Lock(),
+            "question_index": 0,
+            "round_started": False,
+            "expected": set(),
+            "submitted": set(),
+            "current_question_message": None,
+            "timer_task": None,
+            "last_broadcast_ms": None,
+        },
+    )
+    if (
+        user.id != host_id
+        and room["round_started"]
+        and user.id not in room["expected"]
+    ):
+        await websocket.close(code=1008)
+        return
+    old_socket = room["connections"].get(user.id)
+    await websocket.accept(subprotocol="csmqp.v1")
+    room["connections"][user.id] = websocket
+    if old_socket is not None:
+        await old_socket.close(code=1008)
+    await websocket.send_json(
+        {
+            "type": "ROOM_JOINED",
+            "role": "host" if user.id == host_id else "participant",
+            "quiz_title": quiz_title,
+            "question_count": question_count,
+        }
+    )
+    if room["round_started"] and user.id in room["expected"]:
+        await websocket.send_json(room["current_question_message"])
+
+    try:
+        while True:
+            try:
+                message = json.loads(await websocket.receive_text())
+            except (json.JSONDecodeError, TypeError):
+                await send_error(websocket, "Message must be valid JSON")
+                continue
+            if not isinstance(message, dict):
+                await send_error(websocket, "Message must be a JSON object")
+                continue
+
+            if message.get("type") == "START_QUIZ":
+                if user.id != host_id:
+                    await send_error(websocket, "Only the quiz host can start a round")
+                    continue
+                async with room["lock"]:
+                    if room["round_started"]:
+                        await send_error(websocket, "A round is already active")
+                        continue
+                    if not (set(room["connections"]) - {host_id}):
+                        await send_error(websocket, "At least one participant must be connected")
+                        continue
+
+                    with SessionLocal() as db:
+                        live_quiz = load_quiz(db, quiz_id)
+                        if (
+                            live_quiz is None
+                            or room["question_index"] >= len(live_quiz.questions)
+                        ):
+                            await send_error(websocket, "There are no more questions")
+                            continue
+                        if live_quiz.started_at is None:
+                            live_quiz.started_at = datetime.now(UTC)
+                        live_quiz.status = QuizStatus.LIVE
+                        link = live_quiz.questions[room["question_index"]]
+                        question = link.question
+                        db.commit()
+
+                    expected = set(room["connections"]) - {host_id}
+                    room["expected"] = expected
+                    room["submitted"] = set()
+                    room["round_started"] = True
+                    room["round_started_at"] = monotonic()
+                    room["timer_task"] = asyncio.create_task(
+                        end_round_after_timer(quiz_id)
+                    )
+                    room["current_question_message"] = {
+                        "type": "QUESTION_OPEN",
+                        "question_id": question.id,
+                        "question_text": question.question_text,
+                        "options": question.options,
+                        "question_number": room["question_index"] + 1,
+                        "total_questions": question_count,
+                        "duration_seconds": ROUND_SECONDS,
+                        "deadline": (
+                            datetime.now(UTC)
+                            + timedelta(seconds=ROUND_SECONDS)
+                        ).isoformat(),
+                    }
+                    room["last_broadcast_ms"] = await broadcast(
+                        room,
+                        room["current_question_message"],
+                    )
+                continue
+
+            if message.get("type") == "SUBMIT_ANSWER":
+                if user.id == host_id:
+                    await send_error(websocket, "The host cannot submit participant answers")
+                    continue
+                if not room["round_started"] or user.id not in room["expected"]:
+                    await send_error(websocket, "No active round is available")
+                    continue
+                if monotonic() - room["round_started_at"] >= ROUND_SECONDS:
+                    await finish_live_round(quiz_id)
+                    await send_error(websocket, "The round timer has expired")
+                    continue
+
+                question_id = message.get("question_id")
+                answer_index = message.get("answer_index")
+                if (
+                    not isinstance(question_id, int)
+                    or isinstance(question_id, bool)
+                    or not isinstance(answer_index, int)
+                    or isinstance(answer_index, bool)
+                    or question_id <= 0
+                    or answer_index < 0
+                ):
+                    await send_error(websocket, "question_id and answer_index must be integers")
+                    continue
+                if user.id in room["submitted"]:
+                    await send_error(websocket, "An answer was already submitted for this round")
+                    continue
+
+                with SessionLocal() as db:
+                    live_quiz = load_quiz(db, quiz_id)
+                    if live_quiz is None:
+                        await send_error(websocket, "Quiz is unavailable")
+                        continue
+                    link = next(
+                        (
+                            item
+                            for item in live_quiz.questions
+                            if item.question.id == question_id
+                        ),
+                        None,
+                    )
+                    if (
+                        link is None
+                        or room["question_index"] >= len(live_quiz.questions)
+                        or link != live_quiz.questions[room["question_index"]]
+                        or answer_index >= len(link.question.options)
+                    ):
+                        await send_error(websocket, "Answer does not match the open question")
+                        continue
+                    attempt = db.scalar(
+                        select(QuizAttempt).where(
+                            QuizAttempt.quiz_id == quiz_id,
+                            QuizAttempt.student_id == user.id,
+                            QuizAttempt.status == AttemptStatus.ACTIVE,
+                        )
+                    )
+                    if attempt is None:
+                        await send_error(websocket, "Quiz attempt is no longer active")
+                        continue
+                    question_key = str(question_id)
+                    attempt.answers = {**attempt.answers, question_key: answer_index}
+                    attempt.question_timings = {
+                        **attempt.question_timings,
+                        question_key: max(
+                            0, int(monotonic() - room["round_started_at"])
+                        ),
+                    }
+                    db.commit()
+
+                room["submitted"].add(user.id)
+                room["last_broadcast_ms"] = await broadcast(
+                    room,
+                    {
+                        "type": "ANSWER_STATE",
+                        "answered_count": len(room["submitted"]),
+                        "participant_count": len(room["expected"]),
+                    },
+                )
+                if room["submitted"] >= room["expected"]:
+                    await finish_live_round(quiz_id)
+                continue
+
+            await send_error(websocket, "Supported events are START_QUIZ and SUBMIT_ANSWER")
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        if websocket.application_state.name == "CONNECTED":
+            await websocket.close(code=1011)
+    finally:
+        if room["connections"].get(user.id) is websocket:
+            room["connections"].pop(user.id, None)
+        if not room["connections"] and not room["round_started"]:
+            rooms.pop(quiz_id, None)
 
 
 MAX_UPLOAD_SIZE = 25 * 1024 * 1024
