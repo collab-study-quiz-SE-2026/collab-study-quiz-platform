@@ -4,7 +4,7 @@ import { getModerationQueue, approveQuestion, rejectQuestion } from "../api";
 
 export default function ModeratorQueue() {
   const [questions, setQuestions] = useState<Question[]>([]);
-  const [filter, setFilter] = useState<string>("PENDING");
+  const [filter, setFilter] = useState<string>("pending");
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState<{ text: string; type: "success" | "error" } | null>(null);
 
@@ -63,22 +63,22 @@ export default function ModeratorQueue() {
         <div className="tab-pill-group">
           <button
             type="button"
-            className={filter === "PENDING" ? "pill-btn active" : "pill-btn"}
-            onClick={() => setFilter("PENDING")}
+            className={filter === "pending" ? "pill-btn active" : "pill-btn"}
+            onClick={() => setFilter("pending")}
           >
             Pending Review
           </button>
           <button
             type="button"
-            className={filter === "APPROVED" ? "pill-btn active" : "pill-btn"}
-            onClick={() => setFilter("APPROVED")}
+            className={filter === "approved" ? "pill-btn active" : "pill-btn"}
+            onClick={() => setFilter("approved")}
           >
             Approved
           </button>
           <button
             type="button"
-            className={filter === "REJECTED" ? "pill-btn active" : "pill-btn"}
-            onClick={() => setFilter("REJECTED")}
+            className={filter === "rejected" ? "pill-btn active" : "pill-btn"}
+            onClick={() => setFilter("rejected")}
           >
             Rejected
           </button>

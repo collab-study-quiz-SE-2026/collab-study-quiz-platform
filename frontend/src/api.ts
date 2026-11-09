@@ -33,10 +33,16 @@ export function clearAuthToken(): void {
 async function handleResponse<T>(res: Response): Promise<T> {
   if (!res.ok) {
     const errorBody = await res.json().catch(() => ({}));
-    const message =
-      errorBody.detail ||
-      errorBody.message ||
-      `Request failed with status ${res.status}`;
+    let message = `Request failed with status ${res.status}`;
+    if (typeof errorBody.detail === "string") {
+      message = errorBody.detail;
+    } else if (Array.isArray(errorBody.detail)) {
+      message = errorBody.detail
+        .map((e: { msg?: string }) => e.msg || JSON.stringify(e))
+        .join(", ");
+    } else if (errorBody.message) {
+      message = String(errorBody.message);
+    }
     throw new Error(message);
   }
   if (res.status === 204) {
@@ -304,7 +310,7 @@ export async function listStudyMaterials(params?: {
 }
 
 export async function uploadStudyMaterial(formData: FormData): Promise<StudyMaterial> {
-  const res = await fetch(`${API_URL}/materials`, {
+  const res = await fetch(`${API_URL}/materials/upload`, {
     method: "POST",
     headers: authHeaders(),
     body: formData,
