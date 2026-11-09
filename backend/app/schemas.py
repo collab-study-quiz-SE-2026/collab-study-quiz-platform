@@ -130,6 +130,51 @@ class QuizAttemptHistoryResponse(BaseModel):
     duration_seconds: int | None
 
 
+class LearningProgressPoint(BaseModel):
+    attempt_id: int
+    quiz_id: int
+    quiz_title: str
+    completed_at: datetime
+    score: int
+    accuracy_percentage: float
+    correct_answers: int
+    total_questions: int
+    duration_seconds: int | None = None
+    moving_average_score: float
+    trajectory: Literal["improving", "declining", "stable"]
+
+
+class TopicProgressPoint(BaseModel):
+    completed_at: datetime
+    quiz_id: int
+    quiz_title: str
+    correct_answers: int
+    total_questions: int
+    accuracy_percentage: float
+
+
+class TopicProgressTrend(BaseModel):
+    subject: str
+    topic: str
+    total_attempts: int
+    current_accuracy: float
+    history: list[TopicProgressPoint]
+
+
+class LearningProgressResponse(BaseModel):
+    student_id: int
+    total_quizzes_completed: int
+    average_score: float | None = None
+    highest_score: int | None = None
+    lowest_score: int | None = None
+    initial_score: int | None = None
+    latest_score: int | None = None
+    overall_improvement: float | None = None
+    trend_direction: Literal["improving", "declining", "stable", "insufficient_data"]
+    timeline: list[LearningProgressPoint]
+    topic_trends: list[TopicProgressTrend]
+
+
 class QuestionCreate(BaseModel):
     question_text: str = Field(min_length=1)
     options: list[str] = Field(min_length=4, max_length=4)
