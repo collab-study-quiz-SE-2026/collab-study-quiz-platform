@@ -6,16 +6,18 @@ import psycopg
 from botocore.exceptions import BotoCoreError, ClientError
 from fastapi import Depends, FastAPI, HTTPException, WebSocket, WebSocketDisconnect, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app.auth import create_access_token, get_current_user, hash_password, verify_password
 from app.database import get_db
-from app.models import Question, QuestionStatus, User, UserRole
+from app.models import Material, MaterialStatus, Question, QuestionStatus, User, UserRole
 from app.schemas import (
     CategorySummaryResponse,
     LoginRequest,
     MessageResponse,
+    MaterialResponse,
     ModerateQuestionRequest,
     QuestionCreate,
     QuestionResponse,
@@ -116,6 +118,79 @@ def logout(
 @app.get("/auth/me", response_model=UserResponse)
 def read_current_user(current_user: User = Depends(get_current_user)):
     return current_user
+
+
+@app.get("/materials", response_model=list[MaterialResponse])
+@app.get("/api/v1/materials", response_model=list[MaterialResponse], include_in_schema=False)
+def list_materials(
+    course_code: str | None = None,
+    tag: str | None = None,
+    search: str | None = None,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    del current_user
+    materials = db.scalars(
+        select(Material)
+        .where(Material.status == MaterialStatus.PUBLISHED)
+        .order_by(Material.created_at.desc(), Material.id.desc())
+    ).all()
+    normalized_search = search.strip().lower() if search else None
+    return [
+        material
+        for material in materials
+        if (not course_code or material.course_code.lower() == course_code.strip().lower())
+        and (not tag or tag.strip().lower() in {item.lower() for item in material.tags})
+        and (
+            not normalized_search
+            or normalized_search in material.title.lower()
+            or normalized_search in material.course_code.lower()
+            or any(normalized_search in item.lower() for item in material.tags)
+        )
+    ]
+
+
+@app.get("/materials/{material_id}/download")
+@app.get("/api/v1/materials/{material_id}/download", include_in_schema=False)
+def download_material(
+    material_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    del current_user
+    material = db.scalar(
+        select(Material).where(
+            Material.id == material_id,
+            Material.status == MaterialStatus.PUBLISHED,
+        )
+    )
+    if material is None:
+        raise HTTPException(status_code=404, detail="Material not found")
+    if material.content_type not in {"application/pdf", "text/markdown", "text/plain"}:
+        raise HTTPException(status_code=415, detail="Material format is not downloadable")
+
+    try:
+        storage_object = get_storage_client().get_object(
+            Bucket=os.environ["S3_BUCKET"],
+            Key=material.storage_key,
+        )
+    except (BotoCoreError, ClientError, KeyError):
+        raise HTTPException(status_code=404, detail="Material file is unavailable") from None
+
+    body = storage_object["Body"]
+
+    def stream():
+        try:
+            while chunk := body.read(1024 * 1024):
+                yield chunk
+        finally:
+            body.close()
+
+    return StreamingResponse(
+        stream(),
+        media_type=material.content_type,
+        headers={"Content-Disposition": f'attachment; filename="{material.file_name}"'},
+    )
 
 
 @app.get("/auth/users/{user_id}", response_model=UserResponse)

@@ -28,6 +28,11 @@ class QuestionStatus(str, Enum):
     REJECTED = "rejected"
 
 
+class MaterialStatus(str, Enum):
+    PUBLISHED = "published"
+    HIDDEN = "hidden"
+
+
 class User(Base):
     __tablename__ = "users"
     __table_args__ = (
@@ -47,6 +52,11 @@ class User(Base):
         "Question",
         foreign_keys="Question.creator_id",
         back_populates="creator",
+    )
+    materials: Mapped[list["Material"]] = relationship(
+        "Material",
+        foreign_keys="Material.uploader_id",
+        back_populates="uploader",
     )
 
 
@@ -92,4 +102,33 @@ class Question(Base):
     moderator: Mapped["User | None"] = relationship(
         "User",
         foreign_keys=[moderator_id],
+    )
+
+
+class Material(Base):
+    __tablename__ = "materials"
+    __table_args__ = (
+        Index("ix_materials_status", "status"),
+        Index("ix_materials_course_code", "course_code"),
+        Index("ix_materials_uploader_id", "uploader_id"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    title: Mapped[str] = mapped_column(String(200))
+    course_code: Mapped[str] = mapped_column(String(50))
+    tags: Mapped[list[str]] = mapped_column(JSON, default=list)
+    storage_key: Mapped[str] = mapped_column(String(500), unique=True)
+    content_type: Mapped[str] = mapped_column(String(100))
+    file_name: Mapped[str] = mapped_column(String(255))
+    status: Mapped[MaterialStatus] = mapped_column(
+        SqlEnum(MaterialStatus, name="material_status"),
+        default=MaterialStatus.PUBLISHED,
+    )
+    uploader_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC)
+    )
+
+    uploader: Mapped["User"] = relationship(
+        "User", foreign_keys=[uploader_id], back_populates="materials"
     )

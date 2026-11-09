@@ -10,7 +10,7 @@ from pydantic import (
     model_validator,
 )
 
-from app.models import QuestionStatus, UserRole
+from app.models import MaterialStatus, QuestionStatus, UserRole
 
 
 class RegistrationRequest(BaseModel):
@@ -42,6 +42,20 @@ class TokenResponse(BaseModel):
 
 class MessageResponse(BaseModel):
     message: str
+
+
+class MaterialResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    title: str
+    course_code: str
+    tags: list[str]
+    file_name: str
+    content_type: str
+    status: MaterialStatus
+    uploader_id: int
+    created_at: datetime
 
 
 class QuizCreate(BaseModel):
