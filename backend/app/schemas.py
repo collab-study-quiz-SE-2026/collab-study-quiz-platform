@@ -106,6 +106,9 @@ class QuizAttemptResponse(BaseModel):
     student_id: int
     status: AttemptStatus
     score: int | None
+    accuracy: int | None
+    correct_answers: int | None
+    incorrect_answers: int | None
     started_at: datetime
     completed_at: datetime | None
     answered_question_ids: list[int]
