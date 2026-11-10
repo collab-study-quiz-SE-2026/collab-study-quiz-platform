@@ -55,6 +55,10 @@ from app.schemas import (
     TokenResponse,
     UserResponse,
     StudyMaterialResponse,
+    LearningProgressPoint,
+    TopicProgressPoint,
+    TopicProgressTrend,
+    LearningProgressResponse,
     TopicPerformanceDetail,
     TopicPerformanceResponse,
 )
@@ -739,6 +743,214 @@ def read_student_topic_performance(
     if db.get(User, student_id) is None:
         raise HTTPException(status_code=404, detail="User not found")
     return build_topic_performance(student_id, db, subject=subject)
+
+
+def build_learning_progress(student_id: int, db: Session) -> dict:
+    attempts = db.scalars(
+        select(QuizAttempt)
+        .options(
+            selectinload(QuizAttempt.quiz)
+            .selectinload(Quiz.questions)
+            .selectinload(QuizQuestion.question)
+        )
+        .where(
+            QuizAttempt.student_id == student_id,
+            QuizAttempt.status == AttemptStatus.COMPLETED,
+        )
+        .order_by(QuizAttempt.completed_at.asc(), QuizAttempt.id.asc())
+    ).all()
+
+    if not attempts:
+        return {
+            "student_id": student_id,
+            "total_quizzes_completed": 0,
+            "average_score": None,
+            "highest_score": None,
+            "lowest_score": None,
+            "initial_score": None,
+            "latest_score": None,
+            "overall_improvement": None,
+            "trend_direction": "insufficient_data",
+            "timeline": [],
+            "topic_trends": [],
+        }
+
+    scores = [attempt.score for attempt in attempts if attempt.score is not None]
+    average_score = round(sum(scores) / len(scores), 2) if scores else None
+    highest_score = max(scores) if scores else None
+    lowest_score = min(scores) if scores else None
+    initial_score = scores[0] if scores else None
+    latest_score = scores[-1] if scores else None
+    overall_improvement = (
+        round(float(latest_score - initial_score), 2)
+        if latest_score is not None and initial_score is not None
+        else None
+    )
+
+    if len(scores) < 2:
+        trend_direction = "stable"
+    elif latest_score > initial_score:
+        trend_direction = "improving"
+    elif latest_score < initial_score:
+        trend_direction = "declining"
+    else:
+        trend_direction = "stable"
+
+    timeline = []
+    running_scores: list[int] = []
+    topic_history_map: dict[tuple[str, str], list[dict]] = {}
+
+    for attempt in attempts:
+        score = attempt.score or 0
+        running_scores.append(score)
+        moving_avg = round(sum(running_scores) / len(running_scores), 2)
+
+        if len(running_scores) == 1:
+            trajectory = "stable"
+        elif score > running_scores[-2]:
+            trajectory = "improving"
+        elif score < running_scores[-2]:
+            trajectory = "declining"
+        else:
+            trajectory = "stable"
+
+        duration_seconds = None
+        if attempt.started_at and attempt.completed_at:
+            duration_seconds = int(
+                (attempt.completed_at - attempt.started_at).total_seconds()
+            )
+
+        total_questions = len(attempt.quiz.questions)
+        correct_count = (
+            attempt.correct_answer_count
+            if attempt.correct_answer_count is not None
+            else 0
+        )
+        accuracy = (
+            round(100.0 * correct_count / total_questions, 2)
+            if total_questions > 0
+            else 0.0
+        )
+
+        timeline.append(
+            {
+                "attempt_id": attempt.id,
+                "quiz_id": attempt.quiz_id,
+                "quiz_title": attempt.quiz.title,
+                "completed_at": attempt.completed_at,
+                "score": score,
+                "accuracy_percentage": accuracy,
+                "correct_answers": correct_count,
+                "total_questions": total_questions,
+                "duration_seconds": duration_seconds,
+                "moving_average_score": moving_avg,
+                "trajectory": trajectory,
+            }
+        )
+
+        attempt_q_map = {
+            str(link.question.id): link.question for link in attempt.quiz.questions
+        }
+        attempt_topic_stats: dict[tuple[str, str], list[int]] = {}
+        for q_id_str, ans_idx in attempt.answers.items():
+            q = attempt_q_map.get(str(q_id_str))
+            if q is None:
+                continue
+            key = (q.subject or "General", q.topic)
+            if key not in attempt_topic_stats:
+                attempt_topic_stats[key] = [0, 0]
+            attempt_topic_stats[key][1] += 1
+            if ans_idx == q.correct_answer_index:
+                attempt_topic_stats[key][0] += 1
+
+        for key, counts in attempt_topic_stats.items():
+            if key not in topic_history_map:
+                topic_history_map[key] = []
+            topic_acc = (
+                round(100.0 * counts[0] / counts[1], 2) if counts[1] > 0 else 0.0
+            )
+            topic_history_map[key].append(
+                {
+                    "completed_at": attempt.completed_at,
+                    "quiz_id": attempt.quiz_id,
+                    "quiz_title": attempt.quiz.title,
+                    "correct_answers": counts[0],
+                    "total_questions": counts[1],
+                    "accuracy_percentage": topic_acc,
+                }
+            )
+
+    topic_trends = []
+    for (subj, top), hist in sorted(topic_history_map.items()):
+        total_correct = sum(p["correct_answers"] for p in hist)
+        total_q = sum(p["total_questions"] for p in hist)
+        curr_acc = round(100.0 * total_correct / total_q, 2) if total_q > 0 else 0.0
+        topic_trends.append(
+            {
+                "subject": subj,
+                "topic": top,
+                "total_attempts": len(hist),
+                "current_accuracy": curr_acc,
+                "history": hist,
+            }
+        )
+
+    return {
+        "student_id": student_id,
+        "total_quizzes_completed": len(attempts),
+        "average_score": average_score,
+        "highest_score": highest_score,
+        "lowest_score": lowest_score,
+        "initial_score": initial_score,
+        "latest_score": latest_score,
+        "overall_improvement": overall_improvement,
+        "trend_direction": trend_direction,
+        "timeline": timeline,
+        "topic_trends": topic_trends,
+    }
+
+
+@app.get("/analytics/progress", response_model=LearningProgressResponse)
+@app.get("/analytics/progress/me", response_model=LearningProgressResponse)
+@app.get(
+    "/api/v1/analytics/progress",
+    response_model=LearningProgressResponse,
+    include_in_schema=False,
+)
+@app.get(
+    "/api/v1/analytics/progress/me",
+    response_model=LearningProgressResponse,
+    include_in_schema=False,
+)
+def read_my_learning_progress(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    return build_learning_progress(current_user.id, db)
+
+
+@app.get(
+    "/users/{student_id}/analytics/progress",
+    response_model=LearningProgressResponse,
+)
+@app.get(
+    "/api/v1/users/{student_id}/analytics/progress",
+    response_model=LearningProgressResponse,
+    include_in_schema=False,
+)
+def read_student_learning_progress(
+    student_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if current_user.id != student_id and current_user.role != UserRole.MODERATOR:
+        raise HTTPException(
+            status_code=403,
+            detail="You can only access your own learning progress analytics",
+        )
+    if db.get(User, student_id) is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    return build_learning_progress(student_id, db)
 
 
 @app.get("/auth/users/{user_id}", response_model=UserResponse)
