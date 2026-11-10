@@ -7,6 +7,21 @@ ws://127.0.0.1:8000/ws/quizzes/{ROOM_CODE}
 wss://localhost/ws/quizzes/{ROOM_CODE}
 ```
 
+## Using the frontend
+
+1. The host creates a quiz and selects **Open live room as host** beside its
+   room code.
+2. Each participant enters that code in the Play Quiz tab and selects **Join
+   Room**. The frontend first creates the required REST quiz attempt, then
+   opens the authenticated WebSocket connection.
+3. The host starts each round. Participants select and submit an answer before
+   the countdown ends. The answer and standings are revealed only after the
+   server sends `ROUND_END`.
+
+The REST **Start Quiz Now** button remains the self-paced practice flow. The
+live room client uses the WebSocket events below. For local live rooms, keep one
+FastAPI worker running as described in Development limitation.
+
 Use the `wss://` address through the existing local Caddy proxy for encrypted
 connections. First, the participant joins the quiz through the REST API so an
 active quiz attempt exists. The host uses the account that created the quiz.
