@@ -113,6 +113,38 @@ class Question(Base):
     )
 
 
+class StudyMaterial(Base):
+    __tablename__ = "study_materials"
+    __table_args__ = (
+        Index("ix_study_materials_course_code", "course_code"),
+        Index("ix_study_materials_subject", "subject"),
+        Index("ix_study_materials_topic", "topic"),
+        Index("ix_study_materials_uploader_id", "uploader_id"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    title: Mapped[str] = mapped_column(String(200))
+    course_code: Mapped[str] = mapped_column(String(50))
+    subject: Mapped[str] = mapped_column(String(100), default="General")
+    topic: Mapped[str] = mapped_column(String(100), default="General")
+    tags: Mapped[list[str]] = mapped_column(JSON, default=list)
+
+    original_filename: Mapped[str] = mapped_column(String(255))
+    storage_key: Mapped[str] = mapped_column(String(512), unique=True)
+    file_type: Mapped[str] = mapped_column(String(20))
+    mime_type: Mapped[str] = mapped_column(String(100))
+    file_size: Mapped[int] = mapped_column(Integer)
+
+    uploader_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE")
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+    )
+
+
 class Quiz(Base):
     __tablename__ = "quizzes"
     __table_args__ = (
@@ -182,12 +214,13 @@ class QuizAttempt(Base):
     answers: Mapped[dict] = mapped_column(JSON, default=dict)
     question_timings: Mapped[dict] = mapped_column(JSON, default=dict)
     score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    correct_answer_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     started_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(UTC)
     )
     completed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
-
     quiz: Mapped["Quiz"] = relationship("Quiz")
+    student: Mapped["User"] = relationship("User")
     student: Mapped["User"] = relationship("User")

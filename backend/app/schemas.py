@@ -106,6 +106,9 @@ class QuizAttemptResponse(BaseModel):
     student_id: int
     status: AttemptStatus
     score: int | None
+    accuracy: int | None
+    correct_answers: int | None
+    incorrect_answers: int | None
     started_at: datetime
     completed_at: datetime | None
     answered_question_ids: list[int]
@@ -156,6 +159,70 @@ class PerformanceDashboardResponse(BaseModel):
     topic_accuracy: list[PerformanceTopicResponse]
     recent_results: list[PerformanceRecentResultResponse]
     trend: list[PerformanceTrendResponse]
+
+class TopicPerformanceDetail(BaseModel):
+    subject: str
+    topic: str
+    total_questions: int
+    correct_answers: int
+    accuracy_percentage: float
+    average_time_seconds: float | None = None
+    cohort_percentile: float | None = None
+    strength_level: Literal["strong", "moderate", "weak"]
+
+
+class TopicPerformanceResponse(BaseModel):
+    student_id: int
+    total_quizzes_evaluated: int
+    total_questions_evaluated: int
+    topics: list[TopicPerformanceDetail]
+    strong_topics: list[str]
+    weak_topics: list[str]
+
+
+class LearningProgressPoint(BaseModel):
+    attempt_id: int
+    quiz_id: int
+    quiz_title: str
+    completed_at: datetime
+    score: int
+    accuracy_percentage: float
+    correct_answers: int
+    total_questions: int
+    duration_seconds: int | None = None
+    moving_average_score: float
+    trajectory: Literal["improving", "declining", "stable"]
+
+
+class TopicProgressPoint(BaseModel):
+    completed_at: datetime
+    quiz_id: int
+    quiz_title: str
+    correct_answers: int
+    total_questions: int
+    accuracy_percentage: float
+
+
+class TopicProgressTrend(BaseModel):
+    subject: str
+    topic: str
+    total_attempts: int
+    current_accuracy: float
+    history: list[TopicProgressPoint]
+
+
+class LearningProgressResponse(BaseModel):
+    student_id: int
+    total_quizzes_completed: int
+    average_score: float | None = None
+    highest_score: int | None = None
+    lowest_score: int | None = None
+    initial_score: int | None = None
+    latest_score: int | None = None
+    overall_improvement: float | None = None
+    trend_direction: Literal["improving", "declining", "stable", "insufficient_data"]
+    timeline: list[LearningProgressPoint]
+    topic_trends: list[TopicProgressTrend]
 
 
 class QuestionCreate(BaseModel):
@@ -284,3 +351,19 @@ class CategorySummaryResponse(BaseModel):
     subjects: list[str]
     topics: list[str]
     difficulties: list[str]
+
+class StudyMaterialResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    title: str
+    course_code: str
+    subject: str
+    topic: str
+    tags: list[str]
+    original_filename: str
+    file_type: str
+    mime_type: str
+    file_size: int
+    uploader_id: int
+    created_at: datetime
