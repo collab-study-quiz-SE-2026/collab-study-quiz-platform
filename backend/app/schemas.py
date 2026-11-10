@@ -10,7 +10,7 @@ from pydantic import (
     model_validator,
 )
 
-from app.models import MaterialStatus, QuestionStatus, UserRole
+from app.models import AttemptStatus, QuestionStatus, QuizStatus, UserRole
 
 
 class RegistrationRequest(BaseModel):
@@ -44,20 +44,6 @@ class MessageResponse(BaseModel):
     message: str
 
 
-class MaterialResponse(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-
-    id: int
-    title: str
-    course_code: str
-    tags: list[str]
-    file_name: str
-    content_type: str
-    status: MaterialStatus
-    uploader_id: int
-    created_at: datetime
-
-
 class QuizCreate(BaseModel):
     title: str = Field(min_length=1, max_length=200)
     description: str = Field(default="", max_length=1000)
@@ -81,6 +67,132 @@ class QuizCreate(BaseModel):
         if len(ids) != len(set(ids)):
             raise ValueError("Question IDs must be unique")
         return ids
+
+
+class QuizQuestionResponse(BaseModel):
+    id: int
+    question_text: str
+    options: list[str]
+    subject: str
+    topic: str
+    difficulty: str
+
+
+class QuizResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    title: str
+    description: str
+    duration_minutes: int
+    max_attempts: int
+    room_code: str
+    status: QuizStatus
+    host_id: int
+    created_at: datetime
+    started_at: datetime | None
+    questions: list[QuizQuestionResponse]
+
+
+class AnswerSubmission(BaseModel):
+    question_id: int = Field(gt=0)
+    answer_index: int = Field(ge=0)
+    time_spent_seconds: int = Field(ge=0, le=86400)
+
+
+class QuizAttemptResponse(BaseModel):
+    id: int
+    quiz_id: int
+    student_id: int
+    status: AttemptStatus
+    score: int | None
+    accuracy: int | None
+    correct_answers: int | None
+    incorrect_answers: int | None
+    started_at: datetime
+    completed_at: datetime | None
+    answered_question_ids: list[int]
+    question_timings: dict[str, int]
+    questions: list[QuizQuestionResponse]
+
+
+class QuizAttemptHistoryResponse(BaseModel):
+    id: int
+    quiz_id: int
+    quiz_title: str
+    student_id: int
+    status: AttemptStatus
+    score: int | None
+    answers: dict[str, int]
+    question_timings: dict[str, int]
+    started_at: datetime
+    completed_at: datetime | None
+    duration_seconds: int | None
+
+
+class TopicPerformanceDetail(BaseModel):
+    subject: str
+    topic: str
+    total_questions: int
+    correct_answers: int
+    accuracy_percentage: float
+    average_time_seconds: float | None = None
+    cohort_percentile: float | None = None
+    strength_level: Literal["strong", "moderate", "weak"]
+
+
+class TopicPerformanceResponse(BaseModel):
+    student_id: int
+    total_quizzes_evaluated: int
+    total_questions_evaluated: int
+    topics: list[TopicPerformanceDetail]
+    strong_topics: list[str]
+    weak_topics: list[str]
+
+
+class LearningProgressPoint(BaseModel):
+    attempt_id: int
+    quiz_id: int
+    quiz_title: str
+    completed_at: datetime
+    score: int
+    accuracy_percentage: float
+    correct_answers: int
+    total_questions: int
+    duration_seconds: int | None = None
+    moving_average_score: float
+    trajectory: Literal["improving", "declining", "stable"]
+
+
+class TopicProgressPoint(BaseModel):
+    completed_at: datetime
+    quiz_id: int
+    quiz_title: str
+    correct_answers: int
+    total_questions: int
+    accuracy_percentage: float
+
+
+class TopicProgressTrend(BaseModel):
+    subject: str
+    topic: str
+    total_attempts: int
+    current_accuracy: float
+    history: list[TopicProgressPoint]
+
+
+class LearningProgressResponse(BaseModel):
+    student_id: int
+    total_quizzes_completed: int
+    average_score: float | None = None
+    highest_score: int | None = None
+    lowest_score: int | None = None
+    initial_score: int | None = None
+    latest_score: int | None = None
+    overall_improvement: float | None = None
+    trend_direction: Literal["improving", "declining", "stable", "insufficient_data"]
+    timeline: list[LearningProgressPoint]
+    topic_trends: list[TopicProgressTrend]
 
 
 class QuestionCreate(BaseModel):
@@ -209,3 +321,19 @@ class CategorySummaryResponse(BaseModel):
     subjects: list[str]
     topics: list[str]
     difficulties: list[str]
+
+class StudyMaterialResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    title: str
+    course_code: str
+    subject: str
+    topic: str
+    tags: list[str]
+    original_filename: str
+    file_type: str
+    mime_type: str
+    file_size: int
+    uploader_id: int
+    created_at: datetime
