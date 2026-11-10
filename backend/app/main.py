@@ -50,6 +50,7 @@ from app.schemas import (
     QuizAttemptResponse,
     QuizAttemptHistoryResponse,
     QuizResponse,
+    PerformanceDashboardResponse,
     RegistrationRequest,
     RegistrationResponse,
     TokenResponse,
@@ -966,6 +967,126 @@ def read_user(
     if user is None:
         raise HTTPException(status_code=404, detail="User not found")
     return user
+
+
+def build_performance_dashboard(student_id: int, db: Session) -> dict:
+    attempts = db.scalars(
+        select(QuizAttempt)
+        .options(
+            selectinload(QuizAttempt.quiz)
+            .selectinload(Quiz.questions)
+            .selectinload(QuizQuestion.question)
+        )
+        .where(
+            QuizAttempt.student_id == student_id,
+            QuizAttempt.status == AttemptStatus.COMPLETED,
+        )
+        .order_by(QuizAttempt.completed_at.asc(), QuizAttempt.id.asc())
+    ).all()
+
+    scores = [attempt.score for attempt in attempts if attempt.score is not None]
+    topic_totals: dict[str, list[int]] = {}
+    timings: list[int] = []
+    for attempt in attempts:
+        question_by_id = {
+            str(link.question.id): link.question for link in attempt.quiz.questions
+        }
+        for question_id, answer_index in attempt.answers.items():
+            question = question_by_id.get(str(question_id))
+            if question is None:
+                continue
+            topic_totals.setdefault(question.topic, [0, 0])
+            topic_totals[question.topic][0] += 1
+            topic_totals[question.topic][1] += int(
+                answer_index == question.correct_answer_index
+            )
+            if question_id in attempt.question_timings:
+                timings.append(attempt.question_timings[question_id])
+
+    all_scores = db.scalars(
+        select(QuizAttempt.score).where(
+            QuizAttempt.status == AttemptStatus.COMPLETED,
+            QuizAttempt.score.is_not(None),
+        )
+    ).all()
+    cohort_percentile = None
+    if scores and all_scores:
+        average_score = sum(scores) / len(scores)
+        cohort_percentile = round(
+            100 * sum(score <= average_score for score in all_scores) / len(all_scores),
+            2,
+        )
+
+    recent = attempts[-10:][::-1]
+    return {
+        "student_id": student_id,
+        "total_quizzes_attempted": len(attempts),
+        "average_score": round(sum(scores) / len(scores), 2) if scores else None,
+        "average_time_per_question_seconds": (
+            round(sum(timings) / len(timings), 2) if timings else None
+        ),
+        "cohort_percentile": cohort_percentile,
+        "topic_accuracy": [
+            {
+                "topic": topic,
+                "answered_questions": totals[0],
+                "correct_answers": totals[1],
+                "accuracy_percentage": round(100 * totals[1] / totals[0], 2),
+            }
+            for topic, totals in sorted(topic_totals.items())
+        ],
+        "recent_results": [
+            {
+                "attempt_id": attempt.id,
+                "quiz_id": attempt.quiz_id,
+                "quiz_title": attempt.quiz.title,
+                "score": attempt.score,
+                "completed_at": attempt.completed_at,
+            }
+            for attempt in recent
+        ],
+        "trend": [
+            {"date": attempt.completed_at, "score": attempt.score}
+            for attempt in attempts
+        ],
+    }
+
+
+@app.get("/dashboard/performance", response_model=PerformanceDashboardResponse)
+@app.get(
+    "/api/v1/dashboard/performance",
+    response_model=PerformanceDashboardResponse,
+    include_in_schema=False,
+)
+def read_my_performance(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    return build_performance_dashboard(current_user.id, db)
+
+
+@app.get(
+    "/users/{student_id}/dashboard/performance",
+    response_model=PerformanceDashboardResponse,
+)
+@app.get(
+    "/api/v1/users/{student_id}/dashboard/performance",
+    response_model=PerformanceDashboardResponse,
+    include_in_schema=False,
+)
+def read_student_performance(
+    student_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if current_user.id != student_id and current_user.role != UserRole.MODERATOR:
+        raise HTTPException(
+            status_code=403,
+            detail="You can only access your own performance dashboard",
+        )
+    if db.get(User, student_id) is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    return build_performance_dashboard(student_id, db)
 
 
 @app.post(
