@@ -4,13 +4,13 @@ Use this log during Member 2 testing and the Member 1 handoff. Record reproducib
 
 ## Confirmed defects
 
-Three confirmed issues are recorded for team review. No fixes have been made.
+Three defects are recorded. BUG-002 has an implementation fix awaiting browser retest. Shubham owns the two materials fixes.
 
 | ID | Test case / requirement | Area / related issue | Severity | Reproducible? | Owner | Status |
 | --- | --- | --- | --- | --- | --- | --- |
-| BUG-001 | TC-03 / FR-02 / #6 | Study material upload | Medium | Yes | Assigned teammate | Open |
-| BUG-002 | TC-01 / FR-01 / #1 | Moderator demo login | Medium | Yes | Unassigned | Open |
-| BUG-003 | TC-03 / FR-02 / #7 | Study material card layout | Low | Yes | Assigned teammate | Open |
+| BUG-001 | TC-03 / FR-02 / #6 | Study material upload | Medium | Yes | Shubham | Open |
+| BUG-002 | TC-01 / FR-01 / #1 | Moderator demo login | Medium | Yes | Somesh | Fixed; browser retest pending |
+| BUG-003 | TC-03 / FR-02 / #7 | Study material card layout | Low | Yes | Shubham | Open |
 
 ### BUG-001 — Upload accepts missing tags
 
@@ -39,7 +39,7 @@ Three confirmed issues are recorded for team review. No fixes have been made.
 - **Actual:** On login failure, the quick-login helper attempts registration. Registration always creates a student, so the shortcut can end up signed in as a student instead of a moderator.
 - **Evidence:** Reported during local role testing; confirmed in `frontend/src/App.tsx` quick-login fallback and the backend's student-only registration behavior.
 - **Owner / next action:** Team to review and decide the fix in the second pass. For testing now, create a normal account and promote it locally in PostgreSQL.
-- **Status:** Open
+- **Status:** Fixed in 8e4abff; browser retest pending
 
 ### BUG-003 — Long material title overflows its card
 
@@ -95,3 +95,7 @@ Source: `CSMQP - Software Test Plan & Test Cases-1.pdf` in this folder. Include 
 ## Environment observations (not confirmed application defects)
 
 - The existing local `csmqp_test` database has a `users` table but is not at a usable Alembic starting revision. Integration checks used the separate `csmqp_story29_test` database instead. Do not reset or drop either database as part of routine testing.
+
+## 11 November update
+
+BUG-001 and BUG-003 are owned by Shubham (shubhmm19). BUG-002 is implemented in 8e4abff by removing the preset login/switch shortcuts and their automatic registration fallback. The explicit student registration and normal login forms remain available. Frontend build passed. Browser retest is pending. See [QA evidence](qa-2026-11-11/README.md) for current test results.
