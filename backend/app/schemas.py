@@ -130,6 +130,26 @@ class QuizAttemptHistoryResponse(BaseModel):
     duration_seconds: int | None
 
 
+class TopicPerformanceDetail(BaseModel):
+    subject: str
+    topic: str
+    total_questions: int
+    correct_answers: int
+    accuracy_percentage: float
+    average_time_seconds: float | None = None
+    cohort_percentile: float | None = None
+    strength_level: Literal["strong", "moderate", "weak"]
+
+
+class TopicPerformanceResponse(BaseModel):
+    student_id: int
+    total_quizzes_evaluated: int
+    total_questions_evaluated: int
+    topics: list[TopicPerformanceDetail]
+    strong_topics: list[str]
+    weak_topics: list[str]
+
+
 class LearningProgressPoint(BaseModel):
     attempt_id: int
     quiz_id: int
