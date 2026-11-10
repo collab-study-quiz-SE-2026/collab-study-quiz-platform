@@ -7,6 +7,8 @@ collaborating on questions, playing quizzes, and tracking learning progress.
 
 **[Windows setup, commands, and code explanations](docs/FOUNDATION_SETUP.md)**
 
+**[Live quiz WebSocket events and client connection](docs/REALTIME_QUIZ.md)**
+
 **[Story #21 verification and handoff to CI Story #22](docs/FOUNDATION_HANDOFF.md)**
 
 ## Current foundation
