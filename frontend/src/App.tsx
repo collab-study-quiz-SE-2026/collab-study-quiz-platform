@@ -14,8 +14,9 @@ import Quizzes from "./components/Quizzes";
 import StudyMaterials from "./components/StudyMaterials";
 import AttemptHistory from "./components/AttemptHistory";
 import ModeratorQueue from "./components/ModeratorQueue";
+import Analytics from "./components/Analytics";
 
-type MainNavTab = "questions" | "quizzes" | "materials" | "history" | "moderation";
+type MainNavTab = "questions" | "quizzes" | "materials" | "history" | "moderation" | "analytics";
 type AuthMode = "login" | "register";
 
 export default function App() {
@@ -88,32 +89,6 @@ export default function App() {
     setAccount(null);
     setNavTab("questions");
     setAuthMessage({ text: "Logged out successfully.", type: "success" });
-  }
-
-  // Quick 1-Click Demo Logins
-  async function quickLogin(demoEmail: string, demoPass: string) {
-    setSubmittingAuth(true);
-    setAuthMessage(null);
-    try {
-      const res = await loginUser(demoEmail, demoPass);
-      setAuthToken(res.access_token);
-      await loadCurrentAccount();
-      setAuthMessage({ text: `Logged in as ${demoEmail}`, type: "success" });
-    } catch {
-      // If user not found, register first
-      try {
-        await registerUser(demoEmail, demoPass);
-        const res = await loginUser(demoEmail, demoPass);
-        setAuthToken(res.access_token);
-        await loadCurrentAccount();
-        setAuthMessage({ text: `Created and logged in as ${demoEmail}`, type: "success" });
-      } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : "Quick login failed";
-        setAuthMessage({ text: msg, type: "error" });
-      }
-    } finally {
-      setSubmittingAuth(false);
-    }
   }
 
   return (
@@ -201,7 +176,7 @@ export default function App() {
                   type="email"
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
-                  placeholder="e.g. sreejith191105@gmail.com"
+                  placeholder="you@example.com"
                   required
                 />
 
@@ -226,26 +201,7 @@ export default function App() {
                 </button>
               </form>
 
-              {/* Demo Quick-Login Buttons */}
-              <div className="quick-demo-section">
-                <p className="demo-hint-label">⚡ 1-Click Demo Login Shortcuts:</p>
-                <div className="demo-btn-row">
-                  <button
-                    type="button"
-                    className="secondary demo-btn"
-                    onClick={() => quickLogin("sreejith191105@gmail.com", "Password123!")}
-                  >
-                    👤 Student (sreejith)
-                  </button>
-                  <button
-                    type="button"
-                    className="secondary demo-btn"
-                    onClick={() => quickLogin("moderator@csmqp.edu", "Password123!")}
-                  >
-                    🛡️ Moderator Account
-                  </button>
-                </div>
-              </div>
+
             </div>
           </div>
         ) : (
@@ -281,6 +237,7 @@ export default function App() {
               >
                 📊 Attempt History
               </button>
+              <button type="button" className={navTab === "analytics" ? "nav-tab-item active" : "nav-tab-item"} onClick={() => setNavTab("analytics")}>Analytics</button>
               {account.role === "moderator" && (
                 <button
                   type="button"
@@ -292,38 +249,13 @@ export default function App() {
               )}
             </nav>
 
-            {/* Quick Demo Switcher banner for video recording */}
-            <div className="demo-role-banner">
-              <span>
-                Signed in as <strong>{account.email}</strong> ({account.role})
-              </span>
-              <div className="role-switch-actions">
-                {account.role === "student" ? (
-                  <button
-                    type="button"
-                    className="small-btn demo-switch-btn"
-                    onClick={() => quickLogin("moderator@csmqp.edu", "Password123!")}
-                  >
-                    Switch to Moderator View ➔
-                  </button>
-                ) : (
-                  <button
-                    type="button"
-                    className="small-btn demo-switch-btn"
-                    onClick={() => quickLogin("sreejith191105@gmail.com", "Password123!")}
-                  >
-                    Switch to Student View ➔
-                  </button>
-                )}
-              </div>
-            </div>
-
             {/* Render Selected Feature Tab */}
             <div className="tab-viewport">
               {navTab === "questions" && <QuestionBank />}
               {navTab === "quizzes" && <Quizzes />}
               {navTab === "materials" && <StudyMaterials />}
               {navTab === "history" && <AttemptHistory />}
+              {navTab === "analytics" && <Analytics key={account.id} />}
               {navTab === "moderation" && <ModeratorQueue />}
             </div>
           </div>

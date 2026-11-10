@@ -946,3 +946,20 @@ button:disabled {
     justify-content: space-between;
   }
 }
+
+/* Analytics views */
+.analytics-panel { padding: 1rem; background: white; border-radius: 12px; }
+.analytics-controls { display: flex; flex-wrap: wrap; gap: .5rem; margin-bottom: 1rem; }
+.analytics-controls button { width: auto; }
+.analytics-summary, .kpi-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 1rem; }
+.analytics-summary > div, .kpi-card { padding: 1rem; background: #f0f7fb; border-radius: 8px; }
+.analytics-summary dd { margin: .5rem 0 0; font-weight: bold; font-size: 1.25rem; }
+.kpi-label, .kpi-value { display: block; margin-bottom: .5rem; }
+.analytics-table { overflow-x: auto; margin: 1rem 0; }
+.analytics-table table { width: 100%; border-collapse: collapse; }
+.analytics-table th, .analytics-table td { padding: .75rem; text-align: left; border-bottom: 1px solid #dce5ea; }
+.progress-svg-chart { width: 100%; max-width: 800px; height: auto; }
+.chart-tooltip, .topic-trend-card { padding: 1rem; border: 1px solid #dce5ea; border-radius: 8px; }
+.topic-tabs { display: flex; flex-wrap: wrap; gap: .5rem; }
+.topic-tabs button { width: auto; }
+.topic-history-item { display: flex; flex-wrap: wrap; gap: 1rem; padding: .5rem; }
