@@ -17,6 +17,3 @@ node_modules/
 dist/
 *.tsbuildinfo
 .local-certs/
-
-# Tunnel executable
-cloudflared.exe
