@@ -1,0 +1,902 @@
+================================================================================
+COLLABORATIVE STUDY MATERIAL & QUIZ PLATFORM (CSMQP)
+PULL REQUEST #49: STORY #12 (VIEW AND MANAGE QUESTIONS)
+IMPLEMENTATION APPROACH, ARCHITECTURE, AND COMPLETE CODEBASE GUIDE
+================================================================================
+
+1. EXECUTIVE OVERVIEW & PROJECT CONTEXT
+--------------------------------------------------------------------------------
+The Collaborative Study Material & Quiz Platform (CSMQP) is a full-stack, 3-tier
+web platform designed for higher education students to share study materials,
+collaborate on question banks, conduct real-time multiplayer and practice quizzes,
+and evaluate longitudinal topic-level learning analytics.
+
+Architectural Stack:
+- Presentation Tier : React + Vite + TypeScript Single Page Application (SPA).
+- Service/API Tier  : FastAPI (REST & WebSockets) running on Python 3.12+ (or 3.14).
+- Data Tier         : PostgreSQL 15 (relational), SQLAlchemy 2 (ORM), Alembic (migrations),
+                      and S3-compatible object storage (RustFS).
+- Ingress/Security  : Caddy reverse proxy enforcing TLS 1.3, Bcrypt (cost >= 12)
+                      password hashing, HS256 stateless 60-min JWT authentication
+                      with token version invalidation, and strict SQL parameter binding.
+
+Milestone Context:
+- Foundation (Epic #20 / Story #21): Local Docker infrastructure, TLS proxy, and health checks.
+- Epic #1 (Authentication & RBAC, PR #44): 'users' table, registration, login, token revocation.
+- Epic #10 (Collaborative Question Bank):
+  * Story #11 (Issue #11, PR #45): "Create Questions" (contribute validated MCQs).
+  * Story #14 (Issue #14, PR #47): "Question Moderation" (review queue, approval/rejection).
+  * Story #13 (Issue #13, PR #48): "Categorize Questions" (subject/topic/difficulty classification).
+  * Story #12 (Issue #12, PR #49): "View and Manage Questions" (3 Story Points, Sprint 1, Priority: High).
+  * Objective: Allow students to view available questions, enable creators to view and edit
+    their own contributed questions, authorize users (creators/moderators) to delete questions,
+    and guarantee changes are saved and reflected across the question bank immediately.
+
+
+2. ACCEPTANCE CRITERIA & HOW EACH WAS FULFILLED
+--------------------------------------------------------------------------------
+Criteria 1: "Students can view available questions."
+-> Fulfilled:
+   - General/published questions viewable via GET /questions and GET /questions/{id}.
+   - Personal contribution feed via protected GET /questions/me (and GET /questions/my):
+     * Requires authentication (`current_user = Depends(get_current_user)`).
+     * Filters by `creator_id == current_user.id`.
+     * Returns student's entire question contribution history, including pending, approved,
+       and rejected items so they can review their feedback and correct mistakes.
+     * Supports filtering by `status_filter`, `subject`, and `topic`.
+
+Criteria 2: "Question creators can edit their own questions."
+-> Fulfilled:
+   - PATCH /questions/{question_id} (and PUT /questions/{question_id}).
+   - Permission guard enforces that only the question's creator or a moderator can edit:
+     `if question.creator_id != current_user.id and current_user.role != UserRole.MODERATOR: raise 403 Forbidden`.
+   - Supports updating question text, options, answer key, explanation, subject, topic, and difficulty.
+   - If a previously rejected question is updated by its creator, its status automatically resets
+     to `QuestionStatus.PENDING` with cleared moderation notes, allowing re-review by moderators.
+
+Criteria 3: "Authorized users can delete questions."
+-> Fulfilled:
+   - Implemented DELETE /questions/{question_id} (and DELETE /api/v1/questions/{question_id}).
+   - Added DELETE method to CORS `allow_methods` configuration in FastAPI.
+   - Guarded by ownership & role check:
+     * Unauthenticated requests are rejected with HTTP 401 Unauthorized.
+     * Unauthorized students (not the creator and not a moderator) are rejected with
+       HTTP 403 Forbidden ("You can only delete your own questions").
+     * The question's creator OR any authorized moderator can delete the question.
+   - Successfully deletes the database record and returns `{"message": "Question deleted successfully"}`.
+   - Non-existent IDs return HTTP 404 Not Found.
+
+Criteria 4: "Changes are saved and reflected in the question bank."
+-> Fulfilled:
+   - All edit and deletion operations commit directly to PostgreSQL via SQLAlchemy 2.
+   - Edited questions immediately reflect updated prompts, options, and explanations in subsequent
+     lookups via GET /questions/{id} and GET /questions.
+   - Deleted questions immediately vanish from GET /questions and return HTTP 404 on GET /questions/{id}.
+
+
+3. COMMIT DISCIPLINE (2 COMMITS TOTAL)
+--------------------------------------------------------------------------------
+Following the project's strict Conventional Commits standard:
+
+Commit 1 (5c8c757):
+  "feat: add personal question view and deletion endpoints"
+  - Implements GET /questions/me for personal contributed question inspection.
+  - Implements DELETE /questions/{id} with ownership and moderator authorization.
+  - Resets rejected questions to PENDING on creator updates for re-moderation.
+  - Enables DELETE in FastAPI CORS configuration.
+
+Commit 2 (160f51d):
+  "test: add question view, edit, delete, and reflection tests"
+  - Implements 7 comprehensive automated tests in backend/tests/test_manage_questions.py.
+  - Tests viewing questions, personal feed (GET /questions/me), creator editing,
+    reflection in question bank, rejected question reset, authorized deletion (creator & moderator),
+    403 foreign student rejection, and 404 deletion handling.
+
+
+4. COMPLETE CODE LISTINGS BY FILE
+--------------------------------------------------------------------------------
+
+================================================================================
+FILE 1: backend/app/main.py
+================================================================================
+from datetime import UTC, datetime
+import os
+from contextlib import closing
+
+import psycopg
+from botocore.exceptions import BotoCoreError, ClientError
+from fastapi import Depends, FastAPI, HTTPException, WebSocket, WebSocketDisconnect, status
+from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import or_, select
+from sqlalchemy.orm import Session
+
+from app.auth import create_access_token, get_current_user, hash_password, verify_password
+from app.database import get_db
+from app.models import Question, QuestionStatus, User, UserRole
+from app.schemas import (
+    CategorySummaryResponse,
+    LoginRequest,
+    MessageResponse,
+    ModerateQuestionRequest,
+    QuestionCreate,
+    QuestionResponse,
+    QuestionUpdate,
+    RegistrationRequest,
+    RegistrationResponse,
+    TokenResponse,
+    UserResponse,
+)
+from app.storage import get_storage_client
+
+app = FastAPI()
+frontend_origins = [origin.strip() for origin in os.getenv(
+    "FRONTEND_ORIGIN", "http://localhost:5173,https://localhost"
+).split(",")]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=frontend_origins,
+    allow_methods=["GET", "POST", "PATCH", "PUT", "DELETE"],
+    allow_headers=["Authorization", "Content-Type"],
+)
+
+
+def require_moderator(current_user: User = Depends(get_current_user)) -> User:
+    if current_user.role != UserRole.MODERATOR:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Moderator privileges required",
+        )
+    return current_user
+
+
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+
+
+@app.get("/health/db")
+def database_health():
+    try:
+        with psycopg.connect(connect_timeout=3) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT 1")
+                cursor.fetchone()
+    except psycopg.Error:
+        raise HTTPException(status_code=503, detail="Database unavailable") from None
+
+    return {"status": "ok", "database": "connected"}
+
+
+@app.get("/health/storage")
+def storage_health():
+    try:
+        with closing(get_storage_client()) as client:
+            client.head_bucket(Bucket=os.environ["S3_BUCKET"])
+    except (BotoCoreError, ClientError, KeyError):
+        raise HTTPException(status_code=503, detail="Storage unavailable") from None
+    return {"status": "ok", "storage": "connected"}
+
+
+@app.post(
+    "/auth/register",
+    response_model=RegistrationResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def register(details: RegistrationRequest, db: Session = Depends(get_db)):
+    email = str(details.email).lower()
+    if db.scalar(select(User).where(User.email == email)) is not None:
+        raise HTTPException(status_code=409, detail="An account with this email already exists")
+
+    user = User(email=email, password_hash=hash_password(details.password))
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    return {"message": "Registration successful", "user": user}
+
+
+@app.post("/auth/login", response_model=TokenResponse)
+def login(details: LoginRequest, db: Session = Depends(get_db)):
+    email = str(details.email).lower()
+    user = db.scalar(select(User).where(User.email == email))
+    if user is None or not verify_password(details.password, user.password_hash):
+        raise HTTPException(status_code=401, detail="Incorrect email or password")
+
+    return {"access_token": create_access_token(user), "token_type": "bearer"}
+
+
+@app.post("/auth/logout", response_model=MessageResponse)
+def logout(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    current_user.token_version += 1
+    db.commit()
+    return {"message": "Logged out successfully"}
+
+
+@app.get("/auth/me", response_model=UserResponse)
+def read_current_user(current_user: User = Depends(get_current_user)):
+    return current_user
+
+
+@app.get("/auth/users/{user_id}", response_model=UserResponse)
+def read_user(
+    user_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if current_user.id != user_id and current_user.role != UserRole.MODERATOR:
+        raise HTTPException(status_code=403, detail="You can only access your own account")
+
+    user = db.get(User, user_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    return user
+
+
+@app.post(
+    "/questions",
+    response_model=QuestionResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+@app.post(
+    "/api/v1/questions",
+    response_model=QuestionResponse,
+    status_code=status.HTTP_201_CREATED,
+    include_in_schema=False,
+)
+def create_question(
+    details: QuestionCreate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    question = Question(
+        question_text=details.question_text,
+        options=details.options,
+        correct_answer_index=details.correct_answer_index,
+        subject=details.subject,
+        topic=details.topic,
+        difficulty=details.difficulty,
+        explanation=details.explanation,
+        creator_id=current_user.id,
+        status=QuestionStatus.PENDING,
+    )
+    db.add(question)
+    db.commit()
+    db.refresh(question)
+    return question
+
+
+@app.get("/questions/me", response_model=list[QuestionResponse])
+@app.get("/questions/my", response_model=list[QuestionResponse], include_in_schema=False)
+@app.get("/api/v1/questions/me", response_model=list[QuestionResponse], include_in_schema=False)
+def list_my_questions(
+    subject: str | None = None,
+    topic: str | None = None,
+    status_filter: QuestionStatus | None = None,
+    limit: int = 50,
+    offset: int = 0,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """View questions contributed by the currently authenticated student."""
+    stmt = select(Question).where(Question.creator_id == current_user.id)
+    if status_filter:
+        stmt = stmt.where(Question.status == status_filter)
+    if subject:
+        stmt = stmt.where(Question.subject == subject)
+    if topic:
+        stmt = stmt.where(Question.topic == topic)
+    stmt = stmt.order_by(Question.created_at.desc(), Question.id.desc()).offset(offset).limit(limit)
+    return list(db.scalars(stmt).all())
+
+
+@app.get("/questions/categories", response_model=CategorySummaryResponse)
+@app.get(
+    "/api/v1/questions/categories",
+    response_model=CategorySummaryResponse,
+    include_in_schema=False,
+)
+def list_categories(db: Session = Depends(get_db)):
+    """Return distinct subjects, topics, and difficulty levels in the question bank."""
+    subjects = list(db.scalars(select(Question.subject).distinct()).all())
+    topics = list(db.scalars(select(Question.topic).distinct()).all())
+    return CategorySummaryResponse(
+        subjects=sorted(subjects),
+        topics=sorted(topics),
+        difficulties=["easy", "medium", "hard"],
+    )
+
+
+@app.get("/questions/search", response_model=list[QuestionResponse])
+@app.get(
+    "/api/v1/questions/search",
+    response_model=list[QuestionResponse],
+    include_in_schema=False,
+)
+def search_questions(
+    subject: str | None = None,
+    topic: str | None = None,
+    category: str | None = None,
+    difficulty: str | None = None,
+    status_filter: QuestionStatus | None = None,
+    db: Session = Depends(get_db),
+):
+    stmt = select(Question)
+    if status_filter:
+        stmt = stmt.where(Question.status == status_filter)
+    else:
+        # Exclude rejected questions from published search results
+        stmt = stmt.where(Question.status != QuestionStatus.REJECTED)
+
+    if subject:
+        stmt = stmt.where(Question.subject == subject)
+    if topic:
+        stmt = stmt.where(Question.topic == topic)
+    if category:
+        stmt = stmt.where(or_(Question.subject == category, Question.topic == category))
+    if difficulty:
+        stmt = stmt.where(Question.difficulty == difficulty)
+    stmt = stmt.order_by(Question.id.desc())
+    return list(db.scalars(stmt).all())
+
+
+@app.get("/questions/{question_id}", response_model=QuestionResponse)
+@app.get(
+    "/api/v1/questions/{question_id}",
+    response_model=QuestionResponse,
+    include_in_schema=False,
+)
+def read_question(
+    question_id: int,
+    db: Session = Depends(get_db),
+):
+    question = db.get(Question, question_id)
+    if question is None:
+        raise HTTPException(status_code=404, detail="Question not found")
+    return question
+
+
+@app.get("/questions", response_model=list[QuestionResponse])
+@app.get(
+    "/api/v1/questions",
+    response_model=list[QuestionResponse],
+    include_in_schema=False,
+)
+def list_questions(
+    subject: str | None = None,
+    topic: str | None = None,
+    category: str | None = None,
+    difficulty: str | None = None,
+    creator_id: int | None = None,
+    status_filter: QuestionStatus | None = None,
+    limit: int = 50,
+    offset: int = 0,
+    db: Session = Depends(get_db),
+):
+    stmt = select(Question)
+    if status_filter:
+        stmt = stmt.where(Question.status == status_filter)
+    else:
+        # Exclude rejected questions from published sets
+        stmt = stmt.where(Question.status != QuestionStatus.REJECTED)
+
+    if subject:
+        stmt = stmt.where(Question.subject == subject)
+    if topic:
+        stmt = stmt.where(Question.topic == topic)
+    if category:
+        stmt = stmt.where(or_(Question.subject == category, Question.topic == category))
+    if difficulty:
+        stmt = stmt.where(Question.difficulty == difficulty)
+    if creator_id is not None:
+        stmt = stmt.where(Question.creator_id == creator_id)
+    stmt = stmt.order_by(Question.id.desc()).offset(offset).limit(limit)
+    return list(db.scalars(stmt).all())
+
+
+@app.patch("/questions/{question_id}", response_model=QuestionResponse)
+@app.put(
+    "/questions/{question_id}",
+    response_model=QuestionResponse,
+    include_in_schema=False,
+)
+@app.patch(
+    "/api/v1/questions/{question_id}",
+    response_model=QuestionResponse,
+    include_in_schema=False,
+)
+def update_question(
+    question_id: int,
+    details: QuestionUpdate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Update a question. Authorized to the question creator or a moderator."""
+    question = db.get(Question, question_id)
+    if question is None:
+        raise HTTPException(status_code=404, detail="Question not found")
+
+    if question.creator_id != current_user.id and current_user.role != UserRole.MODERATOR:
+        raise HTTPException(status_code=403, detail="You can only update your own questions")
+
+    # Options and correct_answer_index validation
+    new_options = details.options if details.options is not None else question.options
+    new_correct_index = (
+        details.correct_answer_index
+        if details.correct_answer_index is not None
+        else question.correct_answer_index
+    )
+    if new_correct_index >= len(new_options):
+        raise HTTPException(
+            status_code=422,
+            detail="correct_answer_index must refer to an option",
+        )
+
+    # Content updates
+    if details.question_text is not None:
+        question.question_text = details.question_text
+    if details.options is not None:
+        question.options = details.options
+    if details.correct_answer_index is not None:
+        question.correct_answer_index = details.correct_answer_index
+    if details.explanation is not None:
+        question.explanation = details.explanation
+
+    # Categorization updates (preserved if None in payload)
+    if details.subject is not None:
+        question.subject = details.subject
+    if details.topic is not None:
+        question.topic = details.topic
+    if details.difficulty is not None:
+        question.difficulty = details.difficulty
+
+    # If a previously rejected question is updated by its creator, reset to pending for re-review
+    if question.status == QuestionStatus.REJECTED and current_user.role != UserRole.MODERATOR:
+        question.status = QuestionStatus.PENDING
+        question.moderator_id = None
+        question.moderated_at = None
+        question.moderation_comment = None
+
+    db.commit()
+    db.refresh(question)
+    return question
+
+
+@app.delete("/questions/{question_id}", response_model=MessageResponse)
+@app.delete(
+    "/api/v1/questions/{question_id}",
+    response_model=MessageResponse,
+    include_in_schema=False,
+)
+def delete_question(
+    question_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Delete a question. Authorized to the question creator or a moderator."""
+    question = db.get(Question, question_id)
+    if question is None:
+        raise HTTPException(status_code=404, detail="Question not found")
+
+    if question.creator_id != current_user.id and current_user.role != UserRole.MODERATOR:
+        raise HTTPException(status_code=403, detail="You can only delete your own questions")
+
+    db.delete(question)
+    db.commit()
+    return {"message": "Question deleted successfully"}
+
+
+# --- Moderation Endpoints (Story #14) ---
+
+
+@app.get("/moderation/questions", response_model=list[QuestionResponse])
+@app.get(
+    "/api/v1/moderation/questions",
+    response_model=list[QuestionResponse],
+    include_in_schema=False,
+)
+def review_submitted_questions(
+    subject: str | None = None,
+    topic: str | None = None,
+    status_filter: QuestionStatus | None = None,
+    limit: int = 50,
+    offset: int = 0,
+    moderator: User = Depends(require_moderator),
+    db: Session = Depends(get_db),
+):
+    """Allow authorized moderators to review submitted questions."""
+    stmt = select(Question)
+    if status_filter:
+        stmt = stmt.where(Question.status == status_filter)
+    if subject:
+        stmt = stmt.where(Question.subject == subject)
+    if topic:
+        stmt = stmt.where(Question.topic == topic)
+    stmt = stmt.order_by(Question.created_at.desc()).offset(offset).limit(limit)
+    return list(db.scalars(stmt).all())
+
+
+@app.patch("/questions/{question_id}/moderate", response_model=QuestionResponse)
+@app.post(
+    "/questions/{question_id}/moderate",
+    response_model=QuestionResponse,
+    include_in_schema=False,
+)
+@app.post(
+    "/api/v1/questions/{question_id}/moderate",
+    response_model=QuestionResponse,
+    include_in_schema=False,
+)
+def moderate_question(
+    question_id: int,
+    decision: ModerateQuestionRequest,
+    moderator: User = Depends(require_moderator),
+    db: Session = Depends(get_db),
+):
+    """Approve or reject a question. Restricted to authorized moderators."""
+    question = db.get(Question, question_id)
+    if question is None:
+        raise HTTPException(status_code=404, detail="Question not found")
+
+    target_status = (
+        QuestionStatus.APPROVED
+        if decision.status == "approved" or decision.action == "approve"
+        else QuestionStatus.REJECTED
+    )
+    question.status = target_status
+    question.moderator_id = moderator.id
+    question.moderated_at = datetime.now(UTC)
+    question.moderation_comment = decision.comment
+
+    db.commit()
+    db.refresh(question)
+    return question
+
+
+@app.post("/questions/{question_id}/approve", response_model=QuestionResponse)
+@app.post(
+    "/api/v1/questions/{question_id}/approve",
+    response_model=QuestionResponse,
+    include_in_schema=False,
+)
+def approve_question(
+    question_id: int,
+    moderator: User = Depends(require_moderator),
+    db: Session = Depends(get_db),
+):
+    """Convenience endpoint: approve question."""
+    return moderate_question(
+        question_id=question_id,
+        decision=ModerateQuestionRequest(status="approved"),
+        moderator=moderator,
+        db=db,
+    )
+
+
+@app.post("/questions/{question_id}/reject", response_model=QuestionResponse)
+@app.post(
+    "/api/v1/questions/{question_id}/reject",
+    response_model=QuestionResponse,
+    include_in_schema=False,
+)
+def reject_question(
+    question_id: int,
+    comment: str | None = None,
+    moderator: User = Depends(require_moderator),
+    db: Session = Depends(get_db),
+):
+    """Convenience endpoint: reject question."""
+    return moderate_question(
+        question_id=question_id,
+        decision=ModerateQuestionRequest(status="rejected", comment=comment),
+        moderator=moderator,
+        db=db,
+    )
+
+
+@app.websocket("/ws/health")
+async def websocket_health(websocket: WebSocket):
+    origin = websocket.headers.get("origin")
+    if origin is not None and origin not in frontend_origins:
+        await websocket.close(code=1008)
+        return
+
+    await websocket.accept()
+    try:
+        while True:
+            message = await websocket.receive_text()
+            await websocket.send_text("pong" if message == "ping" else "Send ping")
+    except WebSocketDisconnect:
+        pass
+
+
+================================================================================
+FILE 2: backend/tests/test_manage_questions.py
+================================================================================
+from collections.abc import Generator
+
+import pytest
+from fastapi.testclient import TestClient
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.pool import StaticPool
+
+from app.auth import create_access_token, hash_password
+from app.database import Base, get_db
+from app.main import app
+from app.models import Question, QuestionStatus, User, UserRole
+
+
+@pytest.fixture
+def test_setup(monkeypatch) -> Generator[tuple[TestClient, sessionmaker, User, str, User, str, User, str], None, None]:
+    monkeypatch.setenv("JWT_SECRET_KEY", "testing-jwt-secret-key-for-test-suite-12345")
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    TestingSession = sessionmaker(bind=engine, expire_on_commit=False)
+
+    def override_get_db() -> Generator[Session, None, None]:
+        session = TestingSession()
+        try:
+            yield session
+        finally:
+            session.close()
+
+    app.dependency_overrides[get_db] = override_get_db
+
+    with TestingSession() as session:
+        student1 = User(
+            email="author@example.com",
+            password_hash=hash_password("authorpass"),
+            role=UserRole.STUDENT,
+        )
+        student2 = User(
+            email="otherstudent@example.com",
+            password_hash=hash_password("otherpass"),
+            role=UserRole.STUDENT,
+        )
+        moderator = User(
+            email="moderator@example.com",
+            password_hash=hash_password("modpass"),
+            role=UserRole.MODERATOR,
+        )
+        session.add_all([student1, student2, moderator])
+        session.commit()
+        session.refresh(student1)
+        session.refresh(student2)
+        session.refresh(moderator)
+
+        t1 = create_access_token(student1)
+        t2 = create_access_token(student2)
+        tm = create_access_token(moderator)
+
+    with TestClient(app) as client:
+        yield client, TestingSession, student1, t1, student2, t2, moderator, tm
+
+    app.dependency_overrides.clear()
+
+
+def make_question(client, token, **overrides):
+    payload = {
+        "question_text": "Original Question Text?",
+        "options": ["A", "B", "C", "D"],
+        "correct_answer_index": 0,
+        "subject": "Computer Science",
+        "topic": "Algorithms",
+        "difficulty": "easy",
+        "explanation": "Original explanation",
+    }
+    payload.update(overrides)
+    response = client.post(
+        "/questions",
+        json=payload,
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert response.status_code == 201
+    return response.json()
+
+
+def test_students_view_available_questions(test_setup):
+    client, _, student1, t1, _, _, _, _ = test_setup
+
+    q = make_question(client, t1, question_text="What is quicksort?")
+
+    # 1. View available questions in public list
+    list_resp = client.get("/questions")
+    assert list_resp.status_code == 200
+    ids = [item["id"] for item in list_resp.json()]
+    assert q["id"] in ids
+
+    # 2. View specific question details
+    single_resp = client.get(f"/questions/{q['id']}")
+    assert single_resp.status_code == 200
+    assert single_resp.json()["question_text"] == "What is quicksort?"
+
+
+def test_students_view_their_own_contributed_questions(test_setup):
+    client, _, student1, t1, student2, t2, _, _ = test_setup
+
+    q1 = make_question(client, t1, question_text="Author question 1")
+    q2 = make_question(client, t1, question_text="Author question 2")
+    q_other = make_question(client, t2, question_text="Other student question")
+
+    # Author requests their own questions
+    resp = client.get(
+        "/questions/me",
+        headers={"Authorization": f"Bearer {t1}"},
+    )
+    assert resp.status_code == 200
+    my_ids = [item["id"] for item in resp.json()]
+    assert q1["id"] in my_ids
+    assert q2["id"] in my_ids
+    assert q_other["id"] not in my_ids
+
+
+def test_creators_edit_their_own_questions(test_setup):
+    client, _, student1, t1, student2, t2, _, _ = test_setup
+
+    q = make_question(
+        client, t1,
+        question_text="Initial typo in question?",
+        explanation="Initial explanation"
+    )
+
+    # Creator successfully edits the question
+    update_resp = client.patch(
+        f"/questions/{q['id']}",
+        json={
+            "question_text": "Corrected question text?",
+            "explanation": "Refined explanation",
+        },
+        headers={"Authorization": f"Bearer {t1}"},
+    )
+    assert update_resp.status_code == 200
+    data = update_resp.json()
+    assert data["question_text"] == "Corrected question text?"
+    assert data["explanation"] == "Refined explanation"
+
+    # Other student cannot edit author's question
+    forbidden_resp = client.patch(
+        f"/questions/{q['id']}",
+        json={"question_text": "Malicious modification"},
+        headers={"Authorization": f"Bearer {t2}"},
+    )
+    assert forbidden_resp.status_code == 403
+    assert forbidden_resp.json()["detail"] == "You can only update your own questions"
+
+
+def test_changes_saved_and_reflected_in_question_bank(test_setup):
+    client, SessionLocal, student1, t1, _, _, _, _ = test_setup
+
+    q = make_question(client, t1, question_text="Before edit")
+
+    # Perform edit
+    client.patch(
+        f"/questions/{q['id']}",
+        json={"question_text": "After edit - completely reflected"},
+        headers={"Authorization": f"Bearer {t1}"},
+    )
+
+    # 1. Reflected in single question lookup
+    single_res = client.get(f"/questions/{q['id']}")
+    assert single_res.status_code == 200
+    assert single_res.json()["question_text"] == "After edit - completely reflected"
+
+    # 2. Reflected in database
+    with SessionLocal() as session:
+        stored = session.get(Question, q["id"])
+        assert stored.question_text == "After edit - completely reflected"
+
+
+def test_editing_rejected_question_resets_to_pending_for_review(test_setup):
+    client, _, student1, t1, _, _, _, tm = test_setup
+
+    q = make_question(client, t1, question_text="Question with mistake")
+
+    # Moderator rejects the question
+    client.post(
+        f"/questions/{q['id']}/reject?comment=Fix typo",
+        headers={"Authorization": f"Bearer {tm}"},
+    )
+
+    # Creator fixes the mistake
+    edit_resp = client.patch(
+        f"/questions/{q['id']}",
+        json={"question_text": "Question with typo fixed"},
+        headers={"Authorization": f"Bearer {t1}"},
+    )
+    assert edit_resp.status_code == 200
+    # Status reset to pending for re-moderation
+    assert edit_resp.json()["status"] == "pending"
+    assert edit_resp.json()["moderator_id"] is None
+    assert edit_resp.json()["moderation_comment"] is None
+
+
+def test_authorized_users_can_delete_questions(test_setup):
+    client, SessionLocal, student1, t1, student2, t2, moderator, tm = test_setup
+
+    q1 = make_question(client, t1, question_text="Delete by author")
+    q2 = make_question(client, t1, question_text="Delete by moderator")
+
+    # 1. Unauthorized student cannot delete author's question
+    forbid_del = client.delete(
+        f"/questions/{q1['id']}",
+        headers={"Authorization": f"Bearer {t2}"},
+    )
+    assert forbid_del.status_code == 403
+    assert forbid_del.json()["detail"] == "You can only delete your own questions"
+
+    # 2. Unauthenticated request cannot delete
+    unauth_del = client.delete(f"/questions/{q1['id']}")
+    assert unauth_del.status_code == 401
+
+    # 3. Creator deletes their own question
+    del_res1 = client.delete(
+        f"/questions/{q1['id']}",
+        headers={"Authorization": f"Bearer {t1}"},
+    )
+    assert del_res1.status_code == 200
+    assert del_res1.json()["message"] == "Question deleted successfully"
+
+    # Confirm deletion reflected in question bank
+    assert client.get(f"/questions/{q1['id']}").status_code == 404
+    with SessionLocal() as session:
+        assert session.get(Question, q1["id"]) is None
+
+    # 4. Moderator can delete any question
+    del_res2 = client.delete(
+        f"/questions/{q2['id']}",
+        headers={"Authorization": f"Bearer {tm}"},
+    )
+    assert del_res2.status_code == 200
+    assert client.get(f"/questions/{q2['id']}").status_code == 404
+
+
+def test_delete_nonexistent_question(test_setup):
+    client, _, student1, t1, _, _, _, _ = test_setup
+
+    res = client.delete(
+        "/questions/999999",
+        headers={"Authorization": f"Bearer {t1}"},
+    )
+    assert res.status_code == 404
+    assert res.json()["detail"] == "Question not found"
+
+
+5. VERIFICATION & QUALITY CHECKS EXECUTED
+--------------------------------------------------------------------------------
+1. Full Pytest suite:
+   Command: python -m pytest -q
+   Result : 49 passed, 6 skipped.
+2. Manage questions test suite:
+   Command: python -m pytest -q tests/test_manage_questions.py
+   Result : 7 passed.
+3. Categorization test suite:
+   Command: python -m pytest -q tests/test_categorization.py
+   Result : 7 passed.
+4. Moderation test suite:
+   Command: python -m pytest -q tests/test_moderation.py
+   Result : 8 passed.
+5. Question test suite:
+   Command: python -m pytest -q tests/test_questions.py
+   Result : 16 passed.
+6. Package dependency check:
+   Command: python -m pip check
+   Result : No broken requirements found.
+7. Git formatting & whitespace check:
+   Command: git diff --check
+   Result : Clean.
+
+6. PULL REQUEST DETAILS
+--------------------------------------------------------------------------------
+GitHub PR URL   : https://github.com/collab-study-quiz-SE-2026/collab-study-quiz-platform/pull/49
+PR Title        : feat: Implement Story #12 View and Manage Questions
+Head Branch     : feature/view-and-manage-questions
+Base Branch     : main
+Target Issue    : Closes #12, Parent #10
+Author          : Sreejith S (@sreejith1911)
+================================================================================

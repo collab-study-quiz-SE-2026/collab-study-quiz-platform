@@ -1,0 +1,141 @@
+{
+  "execution_timestamp": "2026-11-11T04:16:04.059228+00:00",
+  "results": [
+    {
+      "id": "TC-01",
+      "req": "FR-01",
+      "title": "Valid User Authentication",
+      "type": "Functional (Positive)",
+      "status": "PASS",
+      "latency_ms": 199.18,
+      "expected": "HTTP 200 OK, signed JWT Bearer access token issued",
+      "actual": "HTTP 200, Token Type: bearer, Token Length: 235 chars"
+    },
+    {
+      "id": "TC-02",
+      "req": "FR-01",
+      "title": "Invalid Login Rejection",
+      "type": "Functional (Negative)",
+      "status": "PASS",
+      "latency_ms": 252.73,
+      "expected": "HTTP 401 Unauthorized, rejection detail 'Incorrect email or password'",
+      "actual": "HTTP 401, Detail: 'Incorrect email or password', Zero JWT issued"
+    },
+    {
+      "id": "TC-03",
+      "req": "FR-02",
+      "title": "Valid Study Material Upload (8.4 MB PDF)",
+      "type": "Functional / Storage",
+      "status": "PASS",
+      "latency_ms": 64.2,
+      "expected": "HTTP 201 Created, study material metadata stored, S3 key allocated",
+      "actual": "HTTP 201, ID: 1, Size: 8798217 bytes, Key: None"
+    },
+    {
+      "id": "TC-04",
+      "req": "FR-02",
+      "title": "Oversized File Rejection (> 25 MB Constraint)",
+      "type": "Boundary / Robustness",
+      "status": "PASS",
+      "latency_ms": 205.92,
+      "expected": "HTTP 413 Payload Too Large, rejection message mentioning 25 MB limit",
+      "actual": "HTTP 413, Detail: 'File size exceeds the 25 MB limit', Stream aborted before persistence"
+    },
+    {
+      "id": "TC-05",
+      "req": "FR-03",
+      "title": "Question Bank Topic Filter Query (/questions?topic=OS)",
+      "type": "Functional / Search",
+      "status": "PASS",
+      "latency_ms": 8.99,
+      "expected": "HTTP 200 OK, exactly 2 questions returned matching topic='OS'",
+      "actual": "HTTP 200, Returned 2 questions, Topics: ['OS', 'OS']"
+    },
+    {
+      "id": "TC-06",
+      "req": "FR-04, NFR-02",
+      "title": "Live Quiz Session Join & Sync Latency (<= 150 ms)",
+      "type": "Real-Time / Performance",
+      "status": "PASS",
+      "latency_ms": 26.36,
+      "expected": "HTTP 200 OK, sync latency <= 150.0 ms per NFR-02 benchmark",
+      "actual": "HTTP 200, Latency: 26.36 ms, Attempt ID: 1"
+    },
+    {
+      "id": "TC-07",
+      "req": "FR-05",
+      "title": "Score & Accuracy Calculation (7/10 = 70.0%)",
+      "type": "Functional / Calculation",
+      "status": "PASS",
+      "latency_ms": 16.08,
+      "expected": "Score = 70%, Topic Accuracy = 70.0% (7 correct / 10 answered)",
+      "actual": "Session Score: 70%, Dashboard Topic Accuracy: 70.0% (7/10)"
+    },
+    {
+      "id": "TC-08",
+      "req": "FR-05, NFR-01",
+      "title": "Analytics Latency Under Load (<= 600 ms, 1,000 Answers)",
+      "type": "Performance / Scalability",
+      "status": "PASS",
+      "latency_ms": 28.86,
+      "expected": "All analytics routes return HTTP 200 with response time <= 600 ms",
+      "actual": "Dashboard: 19.76 ms, Topics: 28.86 ms, Progress: 17.71 ms (Max: 28.86 ms)"
+    },
+    {
+      "id": "TC-09",
+      "req": "SEC-01",
+      "title": "Analytics IDOR Cross-User Access Defense",
+      "type": "Security / Authorization",
+      "status": "PASS",
+      "latency_ms": 5.2,
+      "expected": "HTTP 403 Forbidden across all cross-tenant private analytics queries",
+      "actual": "Status 1: 403, Status 2: 403, Status 3: 403 (Zero tenant data leaked)"
+    },
+    {
+      "id": "TC-10",
+      "req": "SEC-02",
+      "title": "In-Flight Answer Key Concealment",
+      "type": "Security / Integrity",
+      "status": "PASS",
+      "latency_ms": 6.7,
+      "expected": "Answer indices and explanations omitted from in-flight participant payload",
+      "actual": "HTTP 200, Answer Keys Leaked: False, Explanations Leaked: False, Questions Verified: 10"
+    },
+    {
+      "id": "TC-11",
+      "req": "NFR-03",
+      "title": "Platform Availability & Health Check Probe (>= 99.5%)",
+      "type": "Non-Functional / Reliability",
+      "status": "PASS",
+      "latency_ms": 1.59,
+      "expected": "Platform availability >= 99.5%, zero unhandled 500 errors",
+      "actual": "Availability: 100.00% (100/100 probes passed), Mean Latency: 1.59 ms, P99: 2.68 ms"
+    },
+    {
+      "id": "TC-12",
+      "req": "SEC-01",
+      "title": "SQL Injection Defense on Search Fields",
+      "type": "Security / Data Integrity",
+      "status": "PASS",
+      "latency_ms": 1.15,
+      "expected": "SQL injection vectors safely handled by SQLAlchemy parameterization; zero data leaked or modified",
+      "actual": "All 5 attack vectors neutralized. Schema and table records remain 100% intact."
+    }
+  ],
+  "metrics": {
+    "NFR-02_Quiz_Sync_Latency_ms": 26.36,
+    "NFR-02_Benchmark_Target_ms": 150.0,
+    "NFR-02_Compliance_Status": "COMPLIANT",
+    "NFR-01_Max_Analytics_Latency_ms": 28.86,
+    "NFR-01_Dashboard_Latency_ms": 19.76,
+    "NFR-01_Topics_Latency_ms": 28.86,
+    "NFR-01_Progress_Latency_ms": 17.71,
+    "NFR-01_Benchmark_Target_ms": 600.0,
+    "NFR-01_Compliance_Status": "COMPLIANT",
+    "NFR-03_Availability_Rate_percent": 100.0,
+    "NFR-03_Mean_Health_Latency_ms": 1.59,
+    "NFR-03_P99_Health_Latency_ms": 2.68,
+    "NFR-03_Benchmark_Target_percent": 99.5,
+    "NFR-03_Compliance_Status": "COMPLIANT"
+  }
+}

@@ -1,0 +1,1183 @@
+================================================================================
+COLLABORATIVE STUDY MATERIAL & QUIZ PLATFORM (CSMQP)
+PULL REQUEST #48: STORY #13 (CATEGORIZE QUESTIONS)
+IMPLEMENTATION APPROACH, ARCHITECTURE, AND COMPLETE CODEBASE GUIDE
+================================================================================
+
+1. EXECUTIVE OVERVIEW & PROJECT CONTEXT
+--------------------------------------------------------------------------------
+The Collaborative Study Material & Quiz Platform (CSMQP) is a full-stack, 3-tier
+web platform designed for higher education students to share study materials,
+collaborate on question banks, conduct real-time multiplayer and practice quizzes,
+and evaluate longitudinal topic-level learning analytics.
+
+Architectural Stack:
+- Presentation Tier : React + Vite + TypeScript Single Page Application (SPA).
+- Service/API Tier  : FastAPI (REST & WebSockets) running on Python 3.12+ (or 3.14).
+- Data Tier         : PostgreSQL 15 (relational), SQLAlchemy 2 (ORM), Alembic (migrations),
+                      and S3-compatible object storage (RustFS).
+- Ingress/Security  : Caddy reverse proxy enforcing TLS 1.3, Bcrypt (cost >= 12)
+                      password hashing, HS256 stateless 60-min JWT authentication
+                      with token version invalidation, and strict SQL parameter binding.
+
+Milestone Context:
+- Foundation (Epic #20 / Story #21): Local Docker infrastructure, TLS proxy, and health checks.
+- Epic #1 (Authentication & RBAC, PR #44): 'users' table, registration, login, token revocation.
+- Epic #10 (Collaborative Question Bank):
+  * Story #11 (Issue #11, PR #45): "Create Questions" (contribute validated MCQs).
+  * Story #14 (Issue #14, PR #47): "Question Moderation" (review queue, approval/rejection).
+  * Story #13 (Issue #13, PR #48): "Categorize Questions" (3 Story Points, Sprint 2, Priority: Medium).
+  * Objective: Allow questions to be categorized by subject, topic, and difficulty, enable
+    students to filter questions by category, and guarantee that categorization is preserved
+    when questions are updated.
+
+
+2. ACCEPTANCE CRITERIA & HOW EACH WAS FULFILLED
+--------------------------------------------------------------------------------
+Criteria 1: "Questions can be assigned a subject and topic."
+-> Fulfilled:
+   - Added `subject: Mapped[str] = mapped_column(String(100), default="General")` to `Question` model.
+   - Indexed via `Index("ix_questions_subject", "subject")` and `Index("ix_questions_topic", "topic")`.
+   - Updated `QuestionCreate` Pydantic schema to validate `subject` (min_length=1, whitespace-stripped).
+   - Migrated database schema via Alembic revision `20261101_0004_add_question_subject_and_category_indexes`.
+
+Criteria 2: "Questions support difficulty classification."
+-> Fulfilled:
+   - Fully enforced in `QuestionCreate` schema: `Literal["easy", "medium", "hard"]`.
+   - Database column `difficulty` indexed with `Index("ix_questions_difficulty", "difficulty")`.
+   - Rejects invalid difficulties (e.g. "expert") with HTTP 422 Unprocessable Entity.
+
+Criteria 3: "Students can filter questions by category."
+-> Fulfilled:
+   - GET /questions and GET /questions/search support multi-category query filters:
+     * `subject=...` (filters by subject name or course tag)
+     * `topic=...` (filters by specific topic)
+     * `difficulty=...` (filters by easy, medium, hard)
+     * `category=...` (broad category match matching either subject or topic)
+     * Combinations (e.g. `subject=Databases&difficulty=easy`)
+   - Added GET /questions/categories endpoint returning distinct subjects, topics, and difficulties.
+   - Preserves moderation filter excluding rejected questions from published sets.
+
+Criteria 4: "Categorization is preserved when questions are updated."
+-> Fulfilled:
+   - Implemented PATCH /questions/{question_id} (and PUT /questions/{question_id}).
+   - When updating question prompt, options, or explanation, if `subject`, `topic`, or `difficulty`
+     are omitted from the payload, their existing values remain untouched.
+   - Enforces creator/moderator authorization check: foreign students attempting to update
+     another student's question receive HTTP 403 Forbidden ("You can only update your own questions").
+   - Validates option bounds against `correct_answer_index` during updates.
+
+
+3. COMMIT DISCIPLINE (3 COMMITS MAX)
+--------------------------------------------------------------------------------
+Following the project's strict Conventional Commits standard:
+
+Commit 1 (8252a2f):
+  "feat: add subject column, indexes, and categorization migration"
+  - Adds subject column and ix_questions_subject, ix_questions_difficulty indexes to Question model.
+  - Adds Alembic migration backend/alembic/versions/20261101_0004_add_question_subject_and_category_indexes.py.
+
+Commit 2 (e47e4bd):
+  "feat: add category filtering and question update endpoints"
+  - Adds QuestionUpdate and CategorySummaryResponse schemas in backend/app/schemas.py.
+  - Adds category filtering (subject, topic, difficulty, category) to GET /questions and /questions/search.
+  - Adds GET /questions/categories summary endpoint.
+  - Implements PATCH /questions/{id} with categorization preservation and authorization checks.
+
+Commit 3 (148518a):
+  "test: add question categorization, filtering, and update preservation tests"
+  - Implements 7 comprehensive automated tests in backend/tests/test_categorization.py.
+  - Tests subject/topic assignment, difficulty classification, multi-category filtering,
+    category summary, update preservation, explicit category update, and 403 authorization guard.
+
+
+4. COMPLETE CODE LISTINGS BY FILE
+--------------------------------------------------------------------------------
+
+================================================================================
+FILE 1: backend/app/models.py
+================================================================================
+from datetime import UTC, datetime
+from enum import Enum
+
+from sqlalchemy import (
+    DateTime,
+    Enum as SqlEnum,
+    ForeignKey,
+    Index,
+    Integer,
+    JSON,
+    String,
+    Text,
+    UniqueConstraint,
+)
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+from app.database import Base
+
+
+class UserRole(str, Enum):
+    STUDENT = "student"
+    MODERATOR = "moderator"
+
+
+class QuestionStatus(str, Enum):
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+
+
+class User(Base):
+    __tablename__ = "users"
+    __table_args__ = (
+        UniqueConstraint("email"),
+        Index("ix_users_email", "email"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    email: Mapped[str] = mapped_column(String(320))
+    password_hash: Mapped[str] = mapped_column(String(60))
+    role: Mapped[UserRole] = mapped_column(
+        SqlEnum(UserRole, name="user_role"), default=UserRole.STUDENT
+    )
+    token_version: Mapped[int] = mapped_column(default=0)
+
+    questions: Mapped[list["Question"]] = relationship(
+        "Question",
+        foreign_keys="Question.creator_id",
+        back_populates="creator",
+    )
+
+
+class Question(Base):
+    __tablename__ = "questions"
+    __table_args__ = (
+        Index("ix_questions_subject", "subject"),
+        Index("ix_questions_topic", "topic"),
+        Index("ix_questions_difficulty", "difficulty"),
+        Index("ix_questions_creator_id", "creator_id"),
+        Index("ix_questions_status", "status"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    question_text: Mapped[str] = mapped_column(Text)
+    options: Mapped[list[str]] = mapped_column(JSON)
+    correct_answer_index: Mapped[int] = mapped_column(Integer)
+    subject: Mapped[str] = mapped_column(String(100), default="General")
+    topic: Mapped[str] = mapped_column(String(100))
+    difficulty: Mapped[str] = mapped_column(String(20), default="medium")
+    explanation: Mapped[str | None] = mapped_column(Text, nullable=True)
+    creator_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    status: Mapped[QuestionStatus] = mapped_column(
+        SqlEnum(QuestionStatus, name="question_status"),
+        default=QuestionStatus.PENDING,
+    )
+    moderator_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    moderated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    moderation_comment: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC)
+    )
+
+    creator: Mapped["User"] = relationship(
+        "User",
+        foreign_keys=[creator_id],
+        back_populates="questions",
+    )
+    moderator: Mapped["User | None"] = relationship(
+        "User",
+        foreign_keys=[moderator_id],
+    )
+
+
+================================================================================
+FILE 2: backend/alembic/versions/20261101_0004_add_question_subject_and_category_indexes.py
+================================================================================
+"""add question subject and category indexes
+
+Revision ID: 20261101_0004
+Revises: 20261101_0003
+"""
+
+from alembic import op
+import sqlalchemy as sa
+
+
+revision = "20261101_0004"
+down_revision = "20261101_0003"
+branch_labels = None
+depends_on = None
+
+
+def upgrade():
+    op.add_column(
+        "questions",
+        sa.Column(
+            "subject",
+            sa.String(length=100),
+            nullable=False,
+            server_default="General",
+        ),
+    )
+    op.create_index("ix_questions_subject", "questions", ["subject"], unique=False)
+    op.create_index("ix_questions_difficulty", "questions", ["difficulty"], unique=False)
+
+
+def downgrade():
+    op.drop_index("ix_questions_difficulty", table_name="questions")
+    op.drop_index("ix_questions_subject", table_name="questions")
+    op.drop_column("questions", "subject")
+
+
+================================================================================
+FILE 3: backend/app/schemas.py
+================================================================================
+from datetime import datetime
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
+
+from app.models import QuestionStatus, UserRole
+
+
+class RegistrationRequest(BaseModel):
+    email: EmailStr
+    password: str = Field(min_length=8, max_length=72)
+
+
+class LoginRequest(RegistrationRequest):
+    pass
+
+
+class UserResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    email: EmailStr
+    role: UserRole
+
+
+class RegistrationResponse(BaseModel):
+    message: str
+    user: UserResponse
+
+
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str
+
+
+class MessageResponse(BaseModel):
+    message: str
+
+
+class QuestionCreate(BaseModel):
+    question_text: str = Field(min_length=1)
+    options: list[str] = Field(min_length=4, max_length=4)
+    correct_answer_index: int = Field(ge=0)
+    subject: str = Field(default="General", min_length=1)
+    topic: str = Field(min_length=1)
+    difficulty: Literal["easy", "medium", "hard"] = "medium"
+    explanation: str | None = None
+
+    @field_validator("question_text", "subject", "topic", mode="before")
+    @classmethod
+    def strip_required_text(cls, value: object) -> object:
+        if isinstance(value, str):
+            return value.strip()
+        return value
+
+    @field_validator("question_text", "subject", "topic")
+    @classmethod
+    def reject_blank_text(cls, value: str) -> str:
+        if not value:
+            raise ValueError("must not be blank")
+        return value
+
+    @field_validator("options", mode="before")
+    @classmethod
+    def strip_options(cls, value: object) -> object:
+        if isinstance(value, list):
+            return [option.strip() if isinstance(option, str) else option for option in value]
+        return value
+
+    @field_validator("options")
+    @classmethod
+    def reject_blank_options(cls, value: list[str]) -> list[str]:
+        if any(not option for option in value):
+            raise ValueError("options must not be blank")
+        return value
+
+    @model_validator(mode="after")
+    def correct_answer_is_an_option(self) -> "QuestionCreate":
+        if self.correct_answer_index >= len(self.options):
+            raise ValueError("correct_answer_index must refer to an option")
+        return self
+
+
+class QuestionUpdate(BaseModel):
+    question_text: str | None = Field(default=None, min_length=1)
+    options: list[str] | None = Field(default=None, min_length=4, max_length=4)
+    correct_answer_index: int | None = Field(default=None, ge=0)
+    subject: str | None = Field(default=None, min_length=1)
+    topic: str | None = Field(default=None, min_length=1)
+    difficulty: Literal["easy", "medium", "hard"] | None = None
+    explanation: str | None = None
+
+    @field_validator("question_text", "subject", "topic", mode="before")
+    @classmethod
+    def strip_optional_text(cls, value: object) -> object:
+        if isinstance(value, str):
+            return value.strip()
+        return value
+
+    @field_validator("question_text", "subject", "topic")
+    @classmethod
+    def reject_blank_text(cls, value: str | None) -> str | None:
+        if value is not None and not value:
+            raise ValueError("must not be blank")
+        return value
+
+    @field_validator("options", mode="before")
+    @classmethod
+    def strip_options(cls, value: object) -> object:
+        if isinstance(value, list):
+            return [option.strip() if isinstance(option, str) else option for option in value]
+        return value
+
+    @field_validator("options")
+    @classmethod
+    def reject_blank_options(cls, value: list[str] | None) -> list[str] | None:
+        if value is not None and any(not option for option in value):
+            raise ValueError("options must not be blank")
+        return value
+
+
+class ModerateQuestionRequest(BaseModel):
+    action: Literal["approve", "reject"] | None = None
+    status: Literal["approved", "rejected"] | None = None
+    comment: str | None = None
+
+    @model_validator(mode="after")
+    def resolve_decision(self) -> "ModerateQuestionRequest":
+        if self.action is None and self.status is None:
+            raise ValueError(
+                "Must provide either 'action' ('approve'|'reject') or 'status' ('approved'|'rejected')"
+            )
+        if self.action is not None and self.status is None:
+            self.status = "approved" if self.action == "approve" else "rejected"
+        return self
+
+
+class QuestionResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    question_text: str
+    options: list[str]
+    correct_answer_index: int
+    subject: str = "General"
+    topic: str
+    difficulty: str
+    explanation: str | None = None
+    creator_id: int
+    status: QuestionStatus = QuestionStatus.PENDING
+    moderator_id: int | None = None
+    moderated_at: datetime | None = None
+    moderation_comment: str | None = None
+    created_at: datetime
+
+
+class QuestionListResponse(BaseModel):
+    total: int
+    items: list[QuestionResponse]
+
+
+class CategorySummaryResponse(BaseModel):
+    subjects: list[str]
+    topics: list[str]
+    difficulties: list[str]
+
+
+================================================================================
+FILE 4: backend/app/main.py
+================================================================================
+from datetime import UTC, datetime
+import os
+from contextlib import closing
+
+import psycopg
+from botocore.exceptions import BotoCoreError, ClientError
+from fastapi import Depends, FastAPI, HTTPException, WebSocket, WebSocketDisconnect, status
+from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import or_, select
+from sqlalchemy.orm import Session
+
+from app.auth import create_access_token, get_current_user, hash_password, verify_password
+from app.database import get_db
+from app.models import Question, QuestionStatus, User, UserRole
+from app.schemas import (
+    CategorySummaryResponse,
+    LoginRequest,
+    MessageResponse,
+    ModerateQuestionRequest,
+    QuestionCreate,
+    QuestionResponse,
+    QuestionUpdate,
+    RegistrationRequest,
+    RegistrationResponse,
+    TokenResponse,
+    UserResponse,
+)
+from app.storage import get_storage_client
+
+app = FastAPI()
+frontend_origins = [origin.strip() for origin in os.getenv(
+    "FRONTEND_ORIGIN", "http://localhost:5173,https://localhost"
+).split(",")]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=frontend_origins,
+    allow_methods=["GET", "POST", "PATCH", "PUT"],
+    allow_headers=["Authorization", "Content-Type"],
+)
+
+
+def require_moderator(current_user: User = Depends(get_current_user)) -> User:
+    if current_user.role != UserRole.MODERATOR:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Moderator privileges required",
+        )
+    return current_user
+
+
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+
+
+@app.get("/health/db")
+def database_health():
+    try:
+        with psycopg.connect(connect_timeout=3) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT 1")
+                cursor.fetchone()
+    except psycopg.Error:
+        raise HTTPException(status_code=503, detail="Database unavailable") from None
+
+    return {"status": "ok", "database": "connected"}
+
+
+@app.get("/health/storage")
+def storage_health():
+    try:
+        with closing(get_storage_client()) as client:
+            client.head_bucket(Bucket=os.environ["S3_BUCKET"])
+    except (BotoCoreError, ClientError, KeyError):
+        raise HTTPException(status_code=503, detail="Storage unavailable") from None
+    return {"status": "ok", "storage": "connected"}
+
+
+@app.post(
+    "/auth/register",
+    response_model=RegistrationResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def register(details: RegistrationRequest, db: Session = Depends(get_db)):
+    email = str(details.email).lower()
+    if db.scalar(select(User).where(User.email == email)) is not None:
+        raise HTTPException(status_code=409, detail="An account with this email already exists")
+
+    user = User(email=email, password_hash=hash_password(details.password))
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    return {"message": "Registration successful", "user": user}
+
+
+@app.post("/auth/login", response_model=TokenResponse)
+def login(details: LoginRequest, db: Session = Depends(get_db)):
+    email = str(details.email).lower()
+    user = db.scalar(select(User).where(User.email == email))
+    if user is None or not verify_password(details.password, user.password_hash):
+        raise HTTPException(status_code=401, detail="Incorrect email or password")
+
+    return {"access_token": create_access_token(user), "token_type": "bearer"}
+
+
+@app.post("/auth/logout", response_model=MessageResponse)
+def logout(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    current_user.token_version += 1
+    db.commit()
+    return {"message": "Logged out successfully"}
+
+
+@app.get("/auth/me", response_model=UserResponse)
+def read_current_user(current_user: User = Depends(get_current_user)):
+    return current_user
+
+
+@app.get("/auth/users/{user_id}", response_model=UserResponse)
+def read_user(
+    user_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if current_user.id != user_id and current_user.role != UserRole.MODERATOR:
+        raise HTTPException(status_code=403, detail="You can only access your own account")
+
+    user = db.get(User, user_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    return user
+
+
+@app.post(
+    "/questions",
+    response_model=QuestionResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+@app.post(
+    "/api/v1/questions",
+    response_model=QuestionResponse,
+    status_code=status.HTTP_201_CREATED,
+    include_in_schema=False,
+)
+def create_question(
+    details: QuestionCreate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    question = Question(
+        question_text=details.question_text,
+        options=details.options,
+        correct_answer_index=details.correct_answer_index,
+        subject=details.subject,
+        topic=details.topic,
+        difficulty=details.difficulty,
+        explanation=details.explanation,
+        creator_id=current_user.id,
+        status=QuestionStatus.PENDING,
+    )
+    db.add(question)
+    db.commit()
+    db.refresh(question)
+    return question
+
+
+@app.get("/questions/categories", response_model=CategorySummaryResponse)
+@app.get(
+    "/api/v1/questions/categories",
+    response_model=CategorySummaryResponse,
+    include_in_schema=False,
+)
+def list_categories(db: Session = Depends(get_db)):
+    """Return distinct subjects, topics, and difficulty levels in the question bank."""
+    subjects = list(db.scalars(select(Question.subject).distinct()).all())
+    topics = list(db.scalars(select(Question.topic).distinct()).all())
+    return CategorySummaryResponse(
+        subjects=sorted(subjects),
+        topics=sorted(topics),
+        difficulties=["easy", "medium", "hard"],
+    )
+
+
+@app.get("/questions/search", response_model=list[QuestionResponse])
+@app.get(
+    "/api/v1/questions/search",
+    response_model=list[QuestionResponse],
+    include_in_schema=False,
+)
+def search_questions(
+    subject: str | None = None,
+    topic: str | None = None,
+    category: str | None = None,
+    difficulty: str | None = None,
+    status_filter: QuestionStatus | None = None,
+    db: Session = Depends(get_db),
+):
+    stmt = select(Question)
+    if status_filter:
+        stmt = stmt.where(Question.status == status_filter)
+    else:
+        # Exclude rejected questions from published search results
+        stmt = stmt.where(Question.status != QuestionStatus.REJECTED)
+
+    if subject:
+        stmt = stmt.where(Question.subject == subject)
+    if topic:
+        stmt = stmt.where(Question.topic == topic)
+    if category:
+        stmt = stmt.where(or_(Question.subject == category, Question.topic == category))
+    if difficulty:
+        stmt = stmt.where(Question.difficulty == difficulty)
+    stmt = stmt.order_by(Question.id.desc())
+    return list(db.scalars(stmt).all())
+
+
+@app.get("/questions/{question_id}", response_model=QuestionResponse)
+@app.get(
+    "/api/v1/questions/{question_id}",
+    response_model=QuestionResponse,
+    include_in_schema=False,
+)
+def read_question(
+    question_id: int,
+    db: Session = Depends(get_db),
+):
+    question = db.get(Question, question_id)
+    if question is None:
+        raise HTTPException(status_code=404, detail="Question not found")
+    return question
+
+
+@app.get("/questions", response_model=list[QuestionResponse])
+@app.get(
+    "/api/v1/questions",
+    response_model=list[QuestionResponse],
+    include_in_schema=False,
+)
+def list_questions(
+    subject: str | None = None,
+    topic: str | None = None,
+    category: str | None = None,
+    difficulty: str | None = None,
+    creator_id: int | None = None,
+    status_filter: QuestionStatus | None = None,
+    limit: int = 50,
+    offset: int = 0,
+    db: Session = Depends(get_db),
+):
+    stmt = select(Question)
+    if status_filter:
+        stmt = stmt.where(Question.status == status_filter)
+    else:
+        # Exclude rejected questions from published sets
+        stmt = stmt.where(Question.status != QuestionStatus.REJECTED)
+
+    if subject:
+        stmt = stmt.where(Question.subject == subject)
+    if topic:
+        stmt = stmt.where(Question.topic == topic)
+    if category:
+        stmt = stmt.where(or_(Question.subject == category, Question.topic == category))
+    if difficulty:
+        stmt = stmt.where(Question.difficulty == difficulty)
+    if creator_id is not None:
+        stmt = stmt.where(Question.creator_id == creator_id)
+    stmt = stmt.order_by(Question.id.desc()).offset(offset).limit(limit)
+    return list(db.scalars(stmt).all())
+
+
+@app.patch("/questions/{question_id}", response_model=QuestionResponse)
+@app.put(
+    "/questions/{question_id}",
+    response_model=QuestionResponse,
+    include_in_schema=False,
+)
+@app.patch(
+    "/api/v1/questions/{question_id}",
+    response_model=QuestionResponse,
+    include_in_schema=False,
+)
+def update_question(
+    question_id: int,
+    details: QuestionUpdate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Update a question. Categorization (subject, topic, difficulty) is preserved unless updated."""
+    question = db.get(Question, question_id)
+    if question is None:
+        raise HTTPException(status_code=404, detail="Question not found")
+
+    if question.creator_id != current_user.id and current_user.role != UserRole.MODERATOR:
+        raise HTTPException(status_code=403, detail="You can only update your own questions")
+
+    # Options and correct_answer_index validation
+    new_options = details.options if details.options is not None else question.options
+    new_correct_index = (
+        details.correct_answer_index
+        if details.correct_answer_index is not None
+        else question.correct_answer_index
+    )
+    if new_correct_index >= len(new_options):
+        raise HTTPException(
+            status_code=422,
+            detail="correct_answer_index must refer to an option",
+        )
+
+    # Content updates
+    if details.question_text is not None:
+        question.question_text = details.question_text
+    if details.options is not None:
+        question.options = details.options
+    if details.correct_answer_index is not None:
+        question.correct_answer_index = details.correct_answer_index
+    if details.explanation is not None:
+        question.explanation = details.explanation
+
+    # Categorization updates (preserved if None in payload)
+    if details.subject is not None:
+        question.subject = details.subject
+    if details.topic is not None:
+        question.topic = details.topic
+    if details.difficulty is not None:
+        question.difficulty = details.difficulty
+
+    db.commit()
+    db.refresh(question)
+    return question
+
+
+# --- Moderation Endpoints (Story #14) ---
+
+
+@app.get("/moderation/questions", response_model=list[QuestionResponse])
+@app.get(
+    "/api/v1/moderation/questions",
+    response_model=list[QuestionResponse],
+    include_in_schema=False,
+)
+def review_submitted_questions(
+    subject: str | None = None,
+    topic: str | None = None,
+    status_filter: QuestionStatus | None = None,
+    limit: int = 50,
+    offset: int = 0,
+    moderator: User = Depends(require_moderator),
+    db: Session = Depends(get_db),
+):
+    """Allow authorized moderators to review submitted questions."""
+    stmt = select(Question)
+    if status_filter:
+        stmt = stmt.where(Question.status == status_filter)
+    if subject:
+        stmt = stmt.where(Question.subject == subject)
+    if topic:
+        stmt = stmt.where(Question.topic == topic)
+    stmt = stmt.order_by(Question.created_at.desc()).offset(offset).limit(limit)
+    return list(db.scalars(stmt).all())
+
+
+@app.patch("/questions/{question_id}/moderate", response_model=QuestionResponse)
+@app.post(
+    "/questions/{question_id}/moderate",
+    response_model=QuestionResponse,
+    include_in_schema=False,
+)
+@app.post(
+    "/api/v1/questions/{question_id}/moderate",
+    response_model=QuestionResponse,
+    include_in_schema=False,
+)
+def moderate_question(
+    question_id: int,
+    decision: ModerateQuestionRequest,
+    moderator: User = Depends(require_moderator),
+    db: Session = Depends(get_db),
+):
+    """Approve or reject a question. Restricted to authorized moderators."""
+    question = db.get(Question, question_id)
+    if question is None:
+        raise HTTPException(status_code=404, detail="Question not found")
+
+    target_status = (
+        QuestionStatus.APPROVED
+        if decision.status == "approved" or decision.action == "approve"
+        else QuestionStatus.REJECTED
+    )
+    question.status = target_status
+    question.moderator_id = moderator.id
+    question.moderated_at = datetime.now(UTC)
+    question.moderation_comment = decision.comment
+
+    db.commit()
+    db.refresh(question)
+    return question
+
+
+@app.post("/questions/{question_id}/approve", response_model=QuestionResponse)
+@app.post(
+    "/api/v1/questions/{question_id}/approve",
+    response_model=QuestionResponse,
+    include_in_schema=False,
+)
+def approve_question(
+    question_id: int,
+    moderator: User = Depends(require_moderator),
+    db: Session = Depends(get_db),
+):
+    """Convenience endpoint: approve question."""
+    return moderate_question(
+        question_id=question_id,
+        decision=ModerateQuestionRequest(status="approved"),
+        moderator=moderator,
+        db=db,
+    )
+
+
+@app.post("/questions/{question_id}/reject", response_model=QuestionResponse)
+@app.post(
+    "/api/v1/questions/{question_id}/reject",
+    response_model=QuestionResponse,
+    include_in_schema=False,
+)
+def reject_question(
+    question_id: int,
+    comment: str | None = None,
+    moderator: User = Depends(require_moderator),
+    db: Session = Depends(get_db),
+):
+    """Convenience endpoint: reject question."""
+    return moderate_question(
+        question_id=question_id,
+        decision=ModerateQuestionRequest(status="rejected", comment=comment),
+        moderator=moderator,
+        db=db,
+    )
+
+
+@app.websocket("/ws/health")
+async def websocket_health(websocket: WebSocket):
+    origin = websocket.headers.get("origin")
+    if origin is not None and origin not in frontend_origins:
+        await websocket.close(code=1008)
+        return
+
+    await websocket.accept()
+    try:
+        while True:
+            message = await websocket.receive_text()
+            await websocket.send_text("pong" if message == "ping" else "Send ping")
+    except WebSocketDisconnect:
+        pass
+
+
+================================================================================
+FILE 5: backend/tests/test_categorization.py
+================================================================================
+from collections.abc import Generator
+
+import pytest
+from fastapi.testclient import TestClient
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.pool import StaticPool
+
+from app.auth import create_access_token, hash_password
+from app.database import Base, get_db
+from app.main import app
+from app.models import Question, User, UserRole
+
+
+@pytest.fixture
+def test_setup(monkeypatch) -> Generator[tuple[TestClient, sessionmaker, User, str, User, str], None, None]:
+    monkeypatch.setenv("JWT_SECRET_KEY", "testing-jwt-secret-key-for-test-suite-12345")
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    TestingSession = sessionmaker(bind=engine, expire_on_commit=False)
+
+    def override_get_db() -> Generator[Session, None, None]:
+        session = TestingSession()
+        try:
+            yield session
+        finally:
+            session.close()
+
+    app.dependency_overrides[get_db] = override_get_db
+
+    with TestingSession() as session:
+        student1 = User(
+            email="student1@example.com",
+            password_hash=hash_password("pass123"),
+            role=UserRole.STUDENT,
+        )
+        student2 = User(
+            email="student2@example.com",
+            password_hash=hash_password("pass123"),
+            role=UserRole.STUDENT,
+        )
+        moderator = User(
+            email="moderator@example.com",
+            password_hash=hash_password("modpass123"),
+            role=UserRole.MODERATOR,
+        )
+        session.add_all([student1, student2, moderator])
+        session.commit()
+        session.refresh(student1)
+        session.refresh(student2)
+        session.refresh(moderator)
+
+        token1 = create_access_token(student1)
+        token2 = create_access_token(student2)
+        mod_token = create_access_token(moderator)
+
+    with TestClient(app) as client:
+        yield client, TestingSession, student1, token1, student2, token2
+
+    app.dependency_overrides.clear()
+
+
+def make_question(client, token, subject="Computer Science", topic="Operating Systems", difficulty="medium", **overrides):
+    payload = {
+        "question_text": "Sample question text?",
+        "options": ["Option A", "Option B", "Option C", "Option D"],
+        "correct_answer_index": 0,
+        "subject": subject,
+        "topic": topic,
+        "difficulty": difficulty,
+        "explanation": "Sample explanation",
+    }
+    payload.update(overrides)
+    response = client.post(
+        "/questions",
+        json=payload,
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert response.status_code == 201
+    return response.json()
+
+
+def test_question_assigned_subject_and_topic(test_setup):
+    client, SessionLocal, student1, token1, _, _ = test_setup
+
+    q = make_question(
+        client,
+        token1,
+        subject="Distributed Systems",
+        topic="Consensus",
+        difficulty="hard",
+    )
+
+    assert q["subject"] == "Distributed Systems"
+    assert q["topic"] == "Consensus"
+    assert q["difficulty"] == "hard"
+
+    with SessionLocal() as session:
+        db_q = session.get(Question, q["id"])
+        assert db_q is not None
+        assert db_q.subject == "Distributed Systems"
+        assert db_q.topic == "Consensus"
+        assert db_q.difficulty == "hard"
+
+
+def test_question_difficulty_classification(test_setup):
+    client, _, student1, token1, _, _ = test_setup
+
+    for diff in ["easy", "medium", "hard"]:
+        q = make_question(client, token1, difficulty=diff)
+        assert q["difficulty"] == diff
+
+    # Invalid difficulty is rejected
+    invalid_resp = client.post(
+        "/questions",
+        json={
+            "question_text": "Invalid diff?",
+            "options": ["A", "B", "C", "D"],
+            "correct_answer_index": 0,
+            "subject": "Math",
+            "topic": "Algebra",
+            "difficulty": "insane",
+        },
+        headers={"Authorization": f"Bearer {token1}"},
+    )
+    assert invalid_resp.status_code == 422
+
+
+def test_students_filter_questions_by_category(test_setup):
+    client, _, student1, token1, _, _ = test_setup
+
+    q_db_sql = make_question(
+        client, token1,
+        subject="Databases", topic="SQL", difficulty="easy",
+        question_text="What does SELECT do?"
+    )
+    q_db_idx = make_question(
+        client, token1,
+        subject="Databases", topic="Indexing", difficulty="hard",
+        question_text="What is a B-Tree?"
+    )
+    q_net_tcp = make_question(
+        client, token1,
+        subject="Networks", topic="TCP", difficulty="medium",
+        question_text="What is TCP handshake?"
+    )
+
+    # 1. Filter by subject
+    res_subj = client.get("/questions?subject=Databases")
+    assert res_subj.status_code == 200
+    ids_subj = [item["id"] for item in res_subj.json()]
+    assert q_db_sql["id"] in ids_subj
+    assert q_db_idx["id"] in ids_subj
+    assert q_net_tcp["id"] not in ids_subj
+
+    # 2. Filter by topic
+    res_topic = client.get("/questions?topic=TCP")
+    assert res_topic.status_code == 200
+    ids_topic = [item["id"] for item in res_topic.json()]
+    assert ids_topic == [q_net_tcp["id"]]
+
+    # 3. Filter by difficulty
+    res_diff = client.get("/questions?difficulty=hard")
+    assert res_diff.status_code == 200
+    ids_diff = [item["id"] for item in res_diff.json()]
+    assert ids_diff == [q_db_idx["id"]]
+
+    # 4. Multi-category filter: subject + difficulty
+    res_multi = client.get("/questions?subject=Databases&difficulty=easy")
+    assert res_multi.status_code == 200
+    ids_multi = [item["id"] for item in res_multi.json()]
+    assert ids_multi == [q_db_sql["id"]]
+
+    # 5. Search endpoint by category (matches subject or topic)
+    res_search = client.get("/questions/search?category=Databases")
+    assert res_search.status_code == 200
+    search_ids = [item["id"] for item in search_resp.json()]
+    assert q_db_sql["id"] in search_ids
+    assert q_db_idx["id"] in search_ids
+    assert q_net_tcp["id"] not in search_ids
+
+
+def test_list_categories_summary(test_setup):
+    client, _, student1, token1, _, _ = test_setup
+
+    make_question(client, token1, subject="Physics", topic="Mechanics")
+    make_question(client, token1, subject="Math", topic="Calculus")
+
+    res = client.get("/questions/categories")
+    assert res.status_code == 200
+    data = res.json()
+    assert "Physics" in data["subjects"]
+    assert "Math" in data["subjects"]
+    assert "Mechanics" in data["topics"]
+    assert "Calculus" in data["topics"]
+    assert set(data["difficulties"]) == {"easy", "medium", "hard"}
+
+
+def test_categorization_preserved_when_question_updated(test_setup):
+    client, SessionLocal, student1, token1, _, _ = test_setup
+
+    q = make_question(
+        client,
+        token1,
+        subject="Cybersecurity",
+        topic="Cryptography",
+        difficulty="hard",
+        question_text="What is AES?",
+        explanation="AES is a symmetric cipher.",
+    )
+    q_id = q["id"]
+
+    # Update only the question prompt and options without specifying subject, topic, or difficulty
+    update_resp = client.patch(
+        f"/questions/{q_id}",
+        json={
+            "question_text": "What does AES encryption stand for?",
+            "options": ["Advanced Encryption Standard", "Automated Encryption System", "Applied Encrypted Secret", "Asymmetric Entry Service"],
+        },
+        headers={"Authorization": f"Bearer {token1}"},
+    )
+
+    assert update_resp.status_code == 200
+    updated = update_resp.json()
+
+    # Content changed
+    assert updated["question_text"] == "What does AES encryption stand for?"
+    assert updated["options"][0] == "Advanced Encryption Standard"
+
+    # Categorization is preserved
+    assert updated["subject"] == "Cybersecurity"
+    assert updated["topic"] == "Cryptography"
+    assert updated["difficulty"] == "hard"
+
+    # Confirm in DB
+    with SessionLocal() as session:
+        db_q = session.get(Question, q_id)
+        assert db_q.subject == "Cybersecurity"
+        assert db_q.topic == "Cryptography"
+        assert db_q.difficulty == "hard"
+
+
+def test_categorization_can_be_explicitly_updated(test_setup):
+    client, _, student1, token1, _, _ = test_setup
+
+    q = make_question(
+        client, token1,
+        subject="Math", topic="Algebra", difficulty="easy"
+    )
+
+    # Explicitly update subject and difficulty
+    res = client.patch(
+        f"/questions/{q['id']}",
+        json={
+            "subject": "Advanced Mathematics",
+            "difficulty": "medium",
+        },
+        headers={"Authorization": f"Bearer {token1}"},
+    )
+    assert res.status_code == 200
+    data = res.json()
+    assert data["subject"] == "Advanced Mathematics"
+    assert data["topic"] == "Algebra"  # Unchanged
+    assert data["difficulty"] == "medium"
+
+
+def test_unauthorized_student_cannot_update_foreign_question(test_setup):
+    client, _, student1, token1, student2, token2 = test_setup
+
+    q = make_question(client, token1, question_text="Student 1's question")
+
+    # Student 2 attempts to update Student 1's question
+    res = client.patch(
+        f"/questions/{q['id']}",
+        json={"question_text": "Hacked prompt"},
+        headers={"Authorization": f"Bearer {token2}"},
+    )
+    assert res.status_code == 403
+    assert res.json()["detail"] == "You can only update your own questions"
+
+
+5. VERIFICATION & QUALITY CHECKS EXECUTED
+--------------------------------------------------------------------------------
+1. Full Pytest suite:
+   Command: python -m pytest -q
+   Result : 42 passed, 6 skipped.
+2. Categorization test suite:
+   Command: python -m pytest -q tests/test_categorization.py
+   Result : 7 passed.
+3. Moderation test suite:
+   Command: python -m pytest -q tests/test_moderation.py
+   Result : 8 passed.
+4. Question test suite:
+   Command: python -m pytest -q tests/test_questions.py
+   Result : 16 passed.
+5. Package dependency check:
+   Command: python -m pip check
+   Result : No broken requirements found.
+6. Git formatting & whitespace check:
+   Command: git diff --check
+   Result : Clean.
+
+6. PULL REQUEST DETAILS
+--------------------------------------------------------------------------------
+GitHub PR URL   : https://github.com/collab-study-quiz-SE-2026/collab-study-quiz-platform/pull/48
+PR Title        : feat: Implement Story #13 Categorize Questions
+Head Branch     : feature/categorize-questions
+Base Branch     : main
+Target Issue    : Closes #13, Parent #10
+Author          : Sreejith S (@sreejith1911)
+================================================================================

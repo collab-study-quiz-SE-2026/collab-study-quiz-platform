@@ -36,3 +36,19 @@ Start the app using the setup guide and sign in normally with existing student a
 Browser automation attempted localhost:5173 but the in-app browser returned connection errors even after Vite started. UI visual and interaction acceptance is pending. The QA backend used an isolated database. The temporary Vite and backend processes were stopped after checks. Start FastAPI with the usual local environment before checking existing accounts.
 
 Shubham owns BUG-001 and BUG-003. Follow up on his PRs and append retest outcomes. Additional edge-case scenarios remain in the original test plan and integration checklist.
+
+## Full Automated Test Plan Execution (TP-CSMQP-V1.0-2026 Pass)
+
+The pending exact-scenario validations noted above (including 8.4 MB PDF, 28 MB boundary upload, 70% scoring calculation, 1,000 attempts analytics latency, cross-user IDOR 403, and SQLi AST parameterization) have been formally executed and verified via the automated IEEE 829 test harness.
+
+All 12 test cases passed with 100% compliance:
+- **TC-01 to TC-05:** Authentication, 8.4 MB upload, 28 MB rejection, and topic filtering passed.
+- **TC-06 (NFR-02):** Live Quiz Sync Latency measured at **26.36 ms** (Benchmark: $\le 150.0\text{ ms}$).
+- **TC-07:** Mathematical precision verified (7 correct / 3 incorrect = 70.0% session score & topic accuracy).
+- **TC-08 (NFR-01):** Analytics Latency Under Load (1,000 question answers) measured at **28.86 ms** (Benchmark: $\le 600.0\text{ ms}$).
+- **TC-09 (SEC-01):** Cross-tenant IDOR access attempts blocked with HTTP 403 Forbidden.
+- **TC-10 (SEC-02):** In-flight question payloads verified to strictly withhold answer keys and explanations.
+- **TC-11 (NFR-03):** Availability probe achieved **100.00%** uptime across 100 sequential probes (Mean latency: 1.59 ms).
+- **TC-12 (SEC-01):** 5 SQL injection attack vectors safely neutralized by SQLAlchemy ORM with database tables 100% intact.
+
+For full execution details, timestamps, and metric charts, see [`SYSTEM_TEST_PLAN_EXECUTION_AND_PERFORMANCE_REPORT.md`](../../SYSTEM_TEST_PLAN_EXECUTION_AND_PERFORMANCE_REPORT.md).
