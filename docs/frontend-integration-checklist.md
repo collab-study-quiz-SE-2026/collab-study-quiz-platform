@@ -1,3 +1,5 @@
+> Update, 11 November 2026: The snapshot below is historical. PR #67 integrated the feature screens; the current branch also contains analytics UI and the small materials/history fixes. See [submission readiness](qa-2026-11-11/submission-readiness.md) for current implementation and verification gaps. Do not use the old missing-screen statements as the current backlog.
+
 # Frontend Integration Checklist
 
 Working checklist for integrating `feature/frontend-full-ui` with the latest backend and frontend work. The UI is committed and pushed on `codex/reconcile-frontend-full-ui`; PR #67 is open against `main`. Its frontend build check passed; the backend CI job is blocked by a migration consistency failure also present on the current `main` snapshot. This is a planning document; it does not create or assign GitHub issues.

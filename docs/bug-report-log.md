@@ -99,3 +99,21 @@ Source: `CSMQP - Software Test Plan & Test Cases-1.pdf` in this folder. Include 
 ## 11 November update
 
 BUG-001 and BUG-003 are owned by Shubham (shubhmm19). BUG-002 is implemented in 8e4abff by removing the preset login/switch shortcuts and their automatic registration fallback. The explicit student registration and normal login forms remain available. Frontend build passed. Browser retest is pending. See [QA evidence](qa-2026-11-11/README.md) for current test results.
+
+## 11 November supplemental browser findings
+
+### BUG-004 — Moderator rejection reason is difficult to read
+
+- **Area / issue:** Question moderation / #14
+- **Test case / requirement:** Supplemental browser check for moderator rejection; no dedicated TC in the supplied plan.
+- **Severity:** Low (usability)
+- **Environment / revision:** Local frontend with FastAPI; exact revision not captured.
+- **Steps to reproduce:**
+  1. Submit a disposable question as a student.
+  2. Open the moderator queue and reject it with a message.
+  3. Try to read the entered or displayed message in the small message box.
+- **Expected:** Moderator can read the complete rejection message while entering it and/or the relevant user can read the full message where rejection status is shown.
+- **Actual:** Rejection works, but the text area/message box is too small to see the message comfortably.
+- **Evidence:** User report; no screenshot saved.
+- **Owner / next action:** Unassigned; enlarge the input/display area in a later UI pass and confirm intended visibility of moderator feedback.
+- **Status:** Open
