@@ -71,7 +71,7 @@ export default function LearningProgressChart({ apiUrl, token }: LearningProgres
         const json: LearningProgressResponse = await response.json();
         setData(json);
         if (json.topic_trends.length > 0 && !selectedTopic) {
-          setSelectedTopic(json.topic_trends[0].topic);
+          setSelectedTopic(JSON.stringify([json.topic_trends[0].subject, json.topic_trends[0].topic]));
         }
       } catch (err: unknown) {
         setError(err instanceof Error ? err.message : "Error loading learning progress");
@@ -143,7 +143,7 @@ export default function LearningProgressChart({ apiUrl, token }: LearningProgres
   const activePoint = hoveredIndex !== null ? timeline[hoveredIndex] : null;
 
   const currentTopicTrend = data.topic_trends.find(
-    (t) => t.topic === selectedTopic
+    (t) => JSON.stringify([t.subject, t.topic]) === selectedTopic
   );
 
   return (
@@ -252,6 +252,11 @@ export default function LearningProgressChart({ apiUrl, token }: LearningProgres
                   stroke="#ffffff"
                   strokeWidth={2}
                   style={{ cursor: "pointer", transition: "r 0.15s ease" }}
+                  tabIndex={0}
+                  role="img"
+                  aria-label={`${pt.quiz_title}: ${pt.score}%`}
+                  onFocus={() => setHoveredIndex(i)}
+                  onBlur={() => setHoveredIndex(null)}
                   onMouseEnter={() => setHoveredIndex(i)}
                   onMouseLeave={() => setHoveredIndex(null)}
                 />
@@ -292,10 +297,10 @@ export default function LearningProgressChart({ apiUrl, token }: LearningProgres
           <div className="topic-tabs">
             {data.topic_trends.map((t) => (
               <button
-                key={t.topic}
+                key={JSON.stringify([t.subject, t.topic])}
                 type="button"
-                className={`topic-tab ${selectedTopic === t.topic ? "active" : ""}`}
-                onClick={() => setSelectedTopic(t.topic)}
+                className={`topic-tab ${selectedTopic === JSON.stringify([t.subject, t.topic]) ? "active" : ""}`}
+                onClick={() => setSelectedTopic(JSON.stringify([t.subject, t.topic]))}
               >
                 {t.topic} ({t.current_accuracy}%)
               </button>

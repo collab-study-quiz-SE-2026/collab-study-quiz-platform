@@ -1,0 +1,48 @@
+{
+  "/health": {
+    "status": 200,
+    "body": {
+      "status": "ok"
+    }
+  },
+  "/dashboard/performance": {
+    "status": 200,
+    "body": {
+      "student_id": 1,
+      "total_quizzes_attempted": 0,
+      "average_score": null,
+      "average_time_per_question_seconds": null,
+      "cohort_percentile": null,
+      "topic_accuracy": [],
+      "recent_results": [],
+      "trend": []
+    }
+  },
+  "/analytics/topics": {
+    "status": 200,
+    "body": {
+      "student_id": 1,
+      "total_quizzes_evaluated": 0,
+      "total_questions_evaluated": 0,
+      "topics": [],
+      "strong_topics": [],
+      "weak_topics": []
+    }
+  },
+  "/analytics/progress": {
+    "status": 200,
+    "body": {
+      "student_id": 1,
+      "total_quizzes_completed": 0,
+      "average_score": null,
+      "highest_score": null,
+      "lowest_score": null,
+      "initial_score": null,
+      "latest_score": null,
+      "overall_improvement": null,
+      "trend_direction": "insufficient_data",
+      "timeline": [],
+      "topic_trends": []
+    }
+  }
+}
