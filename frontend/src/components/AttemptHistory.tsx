@@ -9,6 +9,7 @@ export default function AttemptHistory() {
 
   async function loadHistory() {
     setLoading(true);
+    setError(null);
     try {
       const data = await getMyAttemptHistory();
       setHistory(data);
@@ -25,7 +26,7 @@ export default function AttemptHistory() {
   }, []);
 
   function formatDuration(seconds?: number | null): string {
-    if (!seconds) return "—";
+    if (seconds == null) return "—";
     const mins = Math.floor(seconds / 60);
     const secs = seconds % 60;
     if (mins === 0) return `${secs}s`;
@@ -48,7 +49,7 @@ export default function AttemptHistory() {
           <h2>My Quiz Attempt History</h2>
           <p className="subtitle">Track your past scores, completion times, and learning performance</p>
         </div>
-        <button type="button" className="secondary" onClick={() => void loadHistory()}>
+        <button type="button" className="secondary" disabled={loading} onClick={() => void loadHistory()}>
           ↻ Refresh
         </button>
       </div>
@@ -57,7 +58,7 @@ export default function AttemptHistory() {
 
       {loading ? (
         <p className="loading-state">Loading attempt history…</p>
-      ) : history.length === 0 ? (
+      ) : error ? null : history.length === 0 ? (
         <div className="empty-state">
           <p>No completed quiz attempts yet. Join a quiz to see your scores here!</p>
         </div>

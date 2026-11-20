@@ -1,4 +1,4 @@
-import { useState, useEffect, FormEvent, ChangeEvent } from "react";
+import { useState, useEffect, useRef, FormEvent, ChangeEvent } from "react";
 import { StudyMaterial } from "../types";
 import { listStudyMaterials, uploadStudyMaterial, downloadStudyMaterialFile } from "../api";
 
@@ -12,6 +12,10 @@ export default function StudyMaterials() {
   const [searchQuery, setSearchQuery] = useState("");
   const [subjectFilter, setSubjectFilter] = useState("");
   const [topicFilter, setTopicFilter] = useState("");
+  const [tagFilter, setTagFilter] = useState("");
+  const [browseError, setBrowseError] = useState<string | null>(null);
+  const hasFilters = Boolean(searchQuery || subjectFilter || topicFilter || tagFilter);
+  const browseRequest = useRef(0);
 
   // Upload Form State
   const [file, setFile] = useState<File | null>(null);
@@ -23,25 +27,28 @@ export default function StudyMaterials() {
   const [uploading, setUploading] = useState(false);
 
   async function loadMaterials() {
+    const request = ++browseRequest.current;
     setLoading(true);
+    setBrowseError(null);
     try {
       const data = await listStudyMaterials({
         search: searchQuery || undefined,
         subject: subjectFilter || undefined,
         topic: topicFilter || undefined,
+        tag: tagFilter || undefined,
       });
-      setMaterials(data);
+      if (request === browseRequest.current) setMaterials(data);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "Failed to load study materials";
-      setMessage({ text: msg, type: "error" });
+      if (request === browseRequest.current) setBrowseError(msg);
     } finally {
-      setLoading(false);
+      if (request === browseRequest.current) setLoading(false);
     }
   }
 
   useEffect(() => {
     void loadMaterials();
-  }, [searchQuery, subjectFilter, topicFilter]);
+  }, [searchQuery, subjectFilter, topicFilter, tagFilter]);
 
   function handleFileChange(e: ChangeEvent<HTMLInputElement>) {
     if (e.target.files && e.target.files[0]) {
@@ -178,12 +185,29 @@ export default function StudyMaterials() {
             </div>
           </div>
 
+          <div>
+            <label htmlFor="mat-tag">Tag Filter</label>
+            <input id="mat-tag" type="text" placeholder="e.g. exam-prep"
+              value={tagFilter} onChange={(e) => setTagFilter(e.target.value)} />
+            <p className="form-subtext">Subject and topic must match the full value and letter case. Tags match full values, ignoring letter case. Search accepts part of a title, course code or tag.</p>
+            {hasFilters && (
+              <button type="button" className="secondary" onClick={() => {
+                setSearchQuery(""); setSubjectFilter(""); setTopicFilter(""); setTagFilter("");
+              }}>Clear filters</button>
+            )}
+          </div>
+
           {loading ? (
             <p className="loading-state">Loading study materials…</p>
+          ) : browseError ? (
+            <div className="banner-alert banner-error" role="alert">
+              <p>{browseError}</p>
+              <button type="button" onClick={() => void loadMaterials()}>Retry</button>
+            </div>
           ) : materials.length === 0 ? (
             <div className="empty-state">
-              <p>No study materials found.</p>
-              <button type="button" onClick={() => setActiveTab("upload")}>Upload the first document</button>
+              <p>{hasFilters ? "No materials match these filters. Try different values or clear the filters." : "No study materials have been uploaded yet."}</p>
+              {!hasFilters && <button type="button" onClick={() => setActiveTab("upload")}>Upload the first document</button>}
             </div>
           ) : (
             <div className="cards-grid">

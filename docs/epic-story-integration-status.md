@@ -1,3 +1,5 @@
+> Update, 11 November 2026: The snapshot below is historical. PR #67 integrated the feature screens; the current branch also contains analytics UI and the small materials/history fixes. See [submission readiness](qa-2026-11-11/submission-readiness.md) for current implementation and verification gaps. Do not use the old missing-screen statements as the current backlog.
+
 # Epic and Story Integration Status
 
 Snapshot of the repository at `main` commit `61487721390175fa9a1bfee80508cbd4cd287106` (November 10, 2026). This compares each story's GitHub acceptance criteria with code and tests that are actually present in this checkout. A feature in the backend is not counted as fully integrated if its user-facing frontend or required verification is missing.
