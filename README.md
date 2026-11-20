@@ -48,17 +48,31 @@ Persistent log of all completed quiz attempts with scores, question timings, sub
 
 ---
 
-### 7. Performance Analytics & Learning Progress Chart
-Visual analytics dashboard featuring topic accuracy breakdowns, cohort percentiles, strength/weakness diagnostics, and longitudinal progress tracking.
+### 7. Performance Analytics Overview
+Aggregated personal performance dashboard featuring overall quiz attempt counts, average scores, mean answer duration, and high-level subject accuracy distributions.
 
-![Analytics & Learning Progress](docs/screenshots/07-analytics-dashboard.png)
+![Analytics Overview](docs/screenshots/07-analytics-dashboard.png)
 
 ---
 
-### 8. Moderator Queue & Audit Trail
+### 8. Topic-Wise Performance Analytics
+Detailed diagnostic breakdown by academic subject and topic, tracking accuracy percentages, average answer response times, cohort percentiles, and strength/weakness classifications.
+
+![Topic Performance](docs/screenshots/08-topic-performance.png)
+
+---
+
+### 9. Learning Progress & Trajectory Tracking
+Longitudinal learning analytics visualization graphing score trajectories across sequential quiz attempts, moving averages, overall progress deltas, and topic trend curves.
+
+![Learning Progress](docs/screenshots/09-learning-progress.png)
+
+---
+
+### 10. Moderator Queue & Audit Trail
 Dedicated workflow for moderators to review, approve, or reject student-submitted questions with feedback comments before inclusion in public sets.
 
-![Moderator Queue](docs/screenshots/08-moderation-queue.png)
+![Moderator Queue](docs/screenshots/10-moderation-queue.png)
 
 ---
 
