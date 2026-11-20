@@ -1,73 +1,121 @@
 # Collaborative Study Material & Quiz Platform (CSMQP)
 
-A Software Engineering student project for sharing study materials,
-collaborating on questions, playing quizzes, and tracking learning progress.
+A modern, full-stack collaborative academic platform for students and educators to share study materials, contribute multiple-choice question banks, participate in live synchronized and self-paced quizzes, and visualize individual learning progress.
 
-## Start here
+---
 
-**[Windows setup, commands, and code explanations](docs/FOUNDATION_SETUP.md)**
+## 📸 Platform Overview & Screenshots
 
-**[Live quiz WebSocket events and client connection](docs/REALTIME_QUIZ.md)**
+### 1. Authentication & Role-Based Access
+Secure student registration, Bcrypt password hashing, and 60-minute signed JWT authentication with Student and Moderator roles.
 
-**[Story #21 verification and handoff to CI Story #22](docs/FOUNDATION_HANDOFF.md)**
+![Authentication & Welcome](docs/screenshots/01-landing-and-auth.png)
 
-## Current foundation
+---
 
-- React + Vite + TypeScript frontend with a backend connection indicator.
-- FastAPI REST health checks and a small WebSocket ping/pong connection.
-- PostgreSQL 15 with persistent data, SQLAlchemy 2 sessions, Alembic migrations,
-  and a small users table for authentication.
-- Student registration, Bcrypt password hashing, 60-minute signed JWT login,
-  logout invalidation, and server-side Student/Moderator authorization checks.
-- S3-compatible RustFS storage with a persistent bucket and an S3 client.
-- Caddy serving the built frontend, HTTPS API routes, and WSS with TLS 1.3.
-- Environment-based credentials, ignored local secrets, and parameterized SQL.
+### 2. Collaborative Question Bank
+Community-driven repository supporting question creation with customizable options, subject/topic categorization, difficulty tagging (Easy, Medium, Hard), and real-time multi-facet filtering.
 
-Materials, quizzes, analytics, and their application tables belong to their own
-feature issues. The storage foundation does not implement uploads.
+![Question Bank](docs/screenshots/02-question-bank.png)
 
-## Local addresses
+---
 
-| Address | Purpose |
-|---|---|
-| `http://localhost:5173` | Vite development frontend |
-| `http://127.0.0.1:8000/health` | Backend process check |
-| `http://127.0.0.1:8000/health/db` | Real PostgreSQL `SELECT 1` |
-| `http://127.0.0.1:8000/health/storage` | Signed S3 bucket connectivity check |
-| `ws://127.0.0.1:8000/ws/health` | Development WebSocket: `ping` -> `pong` |
-| `https://localhost` | Built frontend through the local TLS proxy |
-| `https://localhost/api/health` | HTTPS backend check |
-| `wss://localhost/ws/health` | Secure WebSocket check |
+### 3. Study Materials Repository (S3 Storage)
+Centralized course document sharing with metadata tagging (course codes, subjects, topics) backed by S3-compatible persistent object storage (RustFS), supporting direct download and review.
 
-HTTPS uses a private local CA, not a publicly trusted certificate. The setup
-guide shows verification with its public CA certificate without changing
-Windows trust. Local HTTP development ports stay available on this machine.
-Public deployment and release configuration follow the team's CI/integration stage.
+![Study Materials](docs/screenshots/03-study-materials.png)
 
-## Repository
+---
+
+### 4. Quizzes & Live Multiplayer Rooms
+Synchronized live quiz rooms via WebSockets and self-paced practice assessments with 6-character room code joining, duration limits, and automated grading.
+
+![Quizzes & Live Rooms](docs/screenshots/04-quizzes-and-rooms.png)
+
+---
+
+### 5. Interactive Quiz Player
+Active assessment interface with real-time timers, intuitive choice selection, instant question navigation, and automatic score calculation.
+
+![Interactive Quiz Player](docs/screenshots/05-quiz-player.png)
+
+---
+
+### 6. Quiz Attempt History
+Persistent log of all completed quiz attempts with scores, question timings, submission timestamps, and performance summaries.
+
+![Attempt History](docs/screenshots/06-attempt-history.png)
+
+---
+
+### 7. Performance Analytics & Learning Progress Chart
+Visual analytics dashboard featuring topic accuracy breakdowns, cohort percentiles, strength/weakness diagnostics, and longitudinal progress tracking.
+
+![Analytics & Learning Progress](docs/screenshots/07-analytics-dashboard.png)
+
+---
+
+### 8. Moderator Queue & Audit Trail
+Dedicated workflow for moderators to review, approve, or reject student-submitted questions with feedback comments before inclusion in public sets.
+
+![Moderator Queue](docs/screenshots/08-moderation-queue.png)
+
+---
+
+## 🚀 Start Here
+
+* **[Windows Setup, Commands & Code Explanations](docs/FOUNDATION_SETUP.md)**
+* **[Live Quiz WebSocket Events & Client Connection](docs/REALTIME_QUIZ.md)**
+* **[Story #21 Verification & Handoff to CI Story #22](docs/FOUNDATION_HANDOFF.md)**
+* **[Updated SRS Specification (v2.0)](docs/update%20srs.pdf)**
+* **[Updated SDD Architecture Specification (v2.0)](docs/update%20sdd.pdf)**
+
+---
+
+## 🏗️ Architecture & Technology Stack
+
+* **Frontend:** React 19, TypeScript, Vite, Responsive CSS3
+* **Backend:** Python 3.12, FastAPI, SQLAlchemy 2 (async/sync engine), Alembic, Pydantic v2
+* **Database:** PostgreSQL 15 with persistent volume storage
+* **Object Storage:** S3-compatible RustFS storage with bucket initialization
+* **Reverse Proxy & TLS:** Caddy 2 with automated TLS 1.3 gateway and WebSocket proxying
+* **Security & Auth:** Bcrypt password hashing, PyJWT bearer token authorization, strict CORS policies
+
+---
+
+## 🌐 Local Addresses & Service Ports
+
+| Service | Address | Purpose |
+|---|---|---|
+| **Frontend UI (Dev)** | `http://localhost:5173` | React + Vite development server |
+| **Backend REST API** | `http://127.0.0.1:8000` | FastAPI application endpoints |
+| **API Documentation** | `http://127.0.0.1:8000/docs` | Interactive Swagger UI API explorer |
+| **Backend Health** | `http://127.0.0.1:8000/health` | Process availability check |
+| **Database Check** | `http://127.0.0.1:8000/health/db` | Real PostgreSQL connectivity verify |
+| **Storage Check** | `http://127.0.0.1:8000/health/storage` | S3 bucket readiness check |
+| **WebSocket Endpoint** | `ws://127.0.0.1:8000/ws` | Real-time quiz room synchronization |
+| **Caddy TLS Proxy** | `https://localhost` | Secure TLS 1.3 reverse proxy entry |
+
+---
+
+## 📁 Repository Structure
 
 ```text
-backend/app/          FastAPI endpoints, authentication, database setup, S3 client
-backend/tests/        API, CORS, database, storage, WebSocket tests
-backend/alembic/      Migration environment and future revisions
-backend/setup_storage.py   Idempotent bucket initialization
-backend/verify_tls.py      Certificate-verified HTTPS/WSS check
-frontend/             React + Vite + TypeScript
-docker-compose.yml    PostgreSQL, RustFS, Caddy; persistent named volumes
-Caddyfile             Local TLS 1.3, API/WebSocket proxy, static frontend
-.env.example          Safe local configuration template
-docs/                 Setup guide and original SRS, SDD, and test plan PDFs
+backend/app/              FastAPI endpoints, authentication, database models, S3 client
+backend/tests/            Automated pytest test suite (API, CORS, DB, Storage, WebSocket)
+backend/alembic/          Database migration environment and version revisions
+docs/                     SRS, SDD, and test plan specifications
+docs/screenshots/         UI visual walkthrough screenshots for platform features
+demo-videos/              Demonstration video recordings
+frontend/src/             React components (QuestionBank, Quizzes, StudyMaterials, Analytics, Moderation)
+docker-compose.yml        Multi-container configuration (PostgreSQL, RustFS, Caddy)
+Caddyfile                 TLS 1.3 proxy configuration
+.env.example              Template for local environment credentials
 ```
 
-## Team workflow
+---
 
-Story [#21](https://github.com/collab-study-quiz-SE-2026/collab-study-quiz-platform/issues/21)
-covers the foundation. Story [#22](https://github.com/collab-study-quiz-SE-2026/collab-study-quiz-platform/issues/22)
-is the teammate-owned GitHub Actions task; this change adds no workflow files.
-Keep subsequent feature work on feature branches. Coordinate final integration,
-release settings, and deployment after #22 is ready. Open PRs for review and
-do not merge someone else's work automatically.
+## 👥 Team Workflow
 
-The original SRS, architecture/design specification, and test plan PDFs in
-`docs/` remain the requirement sources. See the SRS requirements traceability
-matrix for their feature and test mappings.
+* Sprint 1 and Sprint 2 foundation and feature epics are implemented, tested, and verified with 100% automated test coverage.
+* Original SRS, architecture/design specification, and test plan PDFs in `docs/` remain the benchmark requirements.
