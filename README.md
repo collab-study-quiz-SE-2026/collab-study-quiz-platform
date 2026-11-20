@@ -81,6 +81,7 @@ Dedicated workflow for moderators to review, approve, or reject student-submitte
 * **[Windows Setup, Commands & Code Explanations](docs/FOUNDATION_SETUP.md)**
 * **[Live Quiz WebSocket Events & Client Connection](docs/REALTIME_QUIZ.md)**
 * **[Story #21 Verification & Handoff to CI Story #22](docs/FOUNDATION_HANDOFF.md)**
+* **[Requirements Traceability: FRs & Sub-FRs to Stories & Epics (Markdown)](docs/fr-subfr-story-epic-mapping.md)** | **[(PDF Version)](docs/fr-subfr-story-epic-mapping.pdf)**
 * **[Updated SRS Specification (v2.0)](docs/update%20srs.pdf)**
 * **[Updated SDD Architecture Specification (v2.0)](docs/update%20sdd.pdf)**
 
